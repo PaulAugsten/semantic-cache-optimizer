@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual Environments
+venv/
+env/
+ENV/
+.venv
+
+# Poetry
+poetry.lock
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Cache Files
+*.db
+*.index
+faiss.index
+sqlite.db
+*.faiss
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# GPTCache specific
+GPTCache/
+
+# Benchmark Results
+evaluation/benchmark_results.json
+evaluation/data/*.jsonl
+!evaluation/data/README.md
+
+# Temporary files
+*.tmp
+*.bak

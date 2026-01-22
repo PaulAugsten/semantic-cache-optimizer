@@ -1,42 +1,96 @@
-# GPTCache Extensions - Software Quality Project
+# Semantic Caching MVP
 
-Experimentelle Cache-Strategien für GPTCache mit Benchmark-Framework.
+A Python implementation of semantic caching using `gptcache` for a university project. This system decides when to return cached responses versus calling an LLM based on similarity thresholds, reducing costs and latency while maintaining answer correctness.
 
-## Projekt-Übersicht
+## 🎯 Objectives
 
-Vergleich von vier Cache-Strategien:
+- **Cost Reduction**: Minimize LLM API calls through intelligent caching
+- **Latency Optimization**: Fast cache lookups vs. slow LLM generation
+- **High Precision**: Ensure cached answers are correct (prevent wrong responses)
 
-1. **Baseline** - Standard GPTCache (Threshold 0.8)
-2. **Adaptive Threshold** - Dynamische Thresholds je nach Query-Typ
-3. **Cache Aging** - Zeitbasiertes Decay für Einträge
-4. **Partitioned Cache** - Separate Caches für verschiedene Query-Typen
+## 📁 Project Structure
 
-## Struktur
+Todo
+
+## 🚀 Quick Start
+
+### 1. Setup Environment
+
+```powershell
+# Install uv (Windows / PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# Restart your terminal, then verify installation
+uv --version
+
+# Create environment
+uv venv --python 3.11
+
+# Activate virtual environment
+.venv\Scripts\activate
+
+# If activating doesn't work initialy, execute this:
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
+
+# Install dependencies
+uv pip install -r requirements.txt
+```
+
+### 2. Run Demo
+
+```powershell
+python demo.py
+```
+
+### 3. Run Full Evaluation
+
+```powershell
+# Evaluate strategies
+python evaluate.py
+
+# Test Cache Manager
+python test_cache_manager.py
+```
+
+## Configuration
+
+Edit `config.yaml` to customize:
+
+```yaml
+seed: 42
+max_eval_samples: 10000
+
+embedding:
+  model: "sentence-transformers/all-MiniLM-L6-v2"
+  device: "cpu"  # or "cuda"
+
+cache:
+  backend: "faiss"
+  similarity_threshold: 0.85
+
+llm:
+  mode: "hf"
+```
+
+## Threshold Strategies
+
+Todo
+
+## Metrics
+
+- **Precision**: Cache hits that are correct
+- **Recall**: Duplicates successfully found  
+- **False Positive Rate**: Incorrect matches (danger!)
+- **Cache Hit Ratio**: Requests served from cache
+- **Latency**: ms for cache vs. s for LLM
+
+## API Tokens
+
+For HuggingFace models, create a `.env` file:
 
 ```
-implementation/
-├── experiments/           # Cache-Strategien
-├── evaluation/            # Benchmark & Metriken
-│   ├── cache_benchmark.py
-│   └── data/              # Datasets
-└── GPTCache/              # Original GPTCache
+HUGGINGFACE_API_TOKEN=your_token_here
 ```
-
-## Quick Start
-
-```bash
-# Installation
-poetry install
-
-# Benchmark ausführen
-poetry run python evaluation/cache_benchmark.py
-```
-
-Konfiguration in `evaluation/cache_benchmark.py`:
-
--   `MAX_CONVERSATIONS` - Anzahl Queries
-
-Details siehe `evaluation/README.md` und `experiments/README.md`
 
 ## Autoren
 

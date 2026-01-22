@@ -1,0 +1,35 @@
+# Semantic Caching MVP Dependencies
+
+# Core caching library
+gptcache>=0.1.42
+
+# Embeddings
+sentence-transformers>=2.2.0
+transformers>=4.30.0
+
+# Vector store backends
+faiss-cpu>=1.7.4  # Use faiss-gpu for GPU support
+
+# LLM integration
+langchain==0.0.274
+langchain-community>=0.0.10
+langchain-huggingface>=0.0.1
+
+# Dataset
+datasets>=2.14.0
+
+# Utilities
+numpy>=1.24.0
+pandas>=2.0.0
+pyyaml>=6.0
+python-dotenv>=1.0.0
+tqdm>=4.65.0
+
+# Evaluation & visualization
+scikit-learn>=1.3.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+scipy>=1.11.0
+
+# Logging
+loguru>=0.7.0

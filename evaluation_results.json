@@ -1,0 +1,22 @@
+[
+  {
+    "strategy": "fixed",
+    "precision": 0.8620689655172413,
+    "recall": 1.0,
+    "f1_score": 0.9259259259259259,
+    "false_positive_rate": 0.16,
+    "cache_hit_ratio": 0.58,
+    "cache_hits": 29,
+    "cache_misses": 21,
+    "true_positives": 25,
+    "false_positives": 4,
+    "true_negatives": 21,
+    "false_negatives": 0,
+    "avg_cache_hit_latency_ms": 90.77682166263975,
+    "avg_cache_miss_latency_ms": 7550.677503858294,
+    "std_cache_hit_latency_ms": 17.47019345129229,
+    "std_cache_miss_latency_ms": 2440.703110625309,
+    "token_savings": 1450,
+    "total_queries": 50
+  }
+]

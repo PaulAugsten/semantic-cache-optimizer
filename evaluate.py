@@ -246,17 +246,18 @@ def evaluate_strategy(
                 # Cache hit with wrong ID - always a false positive
                 # try:
                 got_idx = int(response_str)
-                row = pairs.filter(lambda x: x["idx"] == got_idx)
-                print(
-                    "Cache hit mismatch:",
-                    question2,
-                    "expected", expected_id,
-                    "got_idx", got_idx,
-                    "question_got1", row["question1"],
-                    "question_got2", row["question2"],
-                )
+                # row = pairs.filter(lambda x: x["idx"] == got_idx)
+                # print(
+                #     "Cache hit mismatch:",
+                #     question2,
+                #     "expected", expected_id,
+                #     "got_idx", got_idx,
+                #     "question_got1", row["question1"],
+                #     "question_got2", row["question2"],
+                # )
                 # except Exception as e:
                 #     print("Cache hit mismatch:", question2, "expected", expected_id, "got_idx", got_idx, "error", e)
+                print("Cache hit mismatch:", question2, "expected", expected_id, "got_idx", got_idx)
                 result.false_positives += 1
         else:
             result.cache_misses += 1

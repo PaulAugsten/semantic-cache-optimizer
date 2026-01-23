@@ -12,8 +12,6 @@ faiss-cpu>=1.7.4  # Use faiss-gpu for GPU support
 
 # LLM integration
 langchain==0.0.274
-langchain-community>=0.0.10
-langchain-huggingface>=0.0.1
 
 # Dataset
 datasets>=2.14.0

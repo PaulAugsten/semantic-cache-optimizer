@@ -16,6 +16,7 @@ from .similarity_evaluators import (
     AdaptiveThresholdCache,
 )
 from .llm_adapter import create_llm
+from .mock_llm import MockLLM
 
 
 class CacheManager:
@@ -31,16 +32,18 @@ class CacheManager:
         "adaptive": AdaptiveThresholdCache,
     }
 
-    def __init__(self, config: Dict[str, Any], strategy: str = "fixed"):
+    def __init__(self, config: Dict[str, Any], strategy: str = "fixed", use_mock_llm: bool = False):
         """
         Initialize cache manager.
 
         Args:
             config: Configuration dictionary.
             strategy: Cache strategy name.
+            use_mock_llm: If True, use instant mock LLM instead of real model.
         """
         self.config = config
         self.strategy_name = strategy
+        self.use_mock_llm = use_mock_llm
         self.cache_instance = None
         self.llm = None
         self.query_log = []
@@ -55,8 +58,12 @@ class CacheManager:
         self.cache_instance = cache_class(self.config)
         self.cache_instance.initialize()
 
-        # Create LLM
-        self.llm = create_llm(self.config)
+        # Create LLM (mock if requested for fast evaluation)
+        if self.use_mock_llm:
+            logger.info("Using MockLLM for fast evaluation (no real inference)")
+            self.llm = MockLLM()
+        else:
+            self.llm = create_llm(self.config)
 
         logger.info(f"Cache manager initialized with strategy: {self.strategy_name}")
 

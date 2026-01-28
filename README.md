@@ -2,17 +2,17 @@
 
 A Python implementation of semantic caching using `gptcache` for a university project. This system decides when to return cached responses versus calling an LLM based on similarity thresholds, reducing costs and latency while maintaining answer correctness.
 
-## 🎯 Objectives
+##  Objectives
 
 - **Cost Reduction**: Minimize LLM API calls through intelligent caching
 - **Latency Optimization**: Fast cache lookups vs. slow LLM generation
 - **High Precision**: Ensure cached answers are correct (prevent wrong responses)
 
-## 📁 Project Structure
+##  Project Structure
 
 Todo
 
-## 🚀 Quick Start
+##  Quick Start
 
 ### 1. Setup Environment
 

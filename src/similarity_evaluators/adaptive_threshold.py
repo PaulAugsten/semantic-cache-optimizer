@@ -30,12 +30,13 @@ from gptcache.config import Config
 class QueryCategory(Enum):
     """Semantic query categories."""
 
-    FACTUAL = "factual"  # Factual questions
+    FACTUAL = "factual"  # Pure factual questions: "What IS X?"
+    SUBJECTIVE = "subjective"  # Opinion, advice, recommendations: "Should I...", "Best way to..."
+    COMPARISON = "comparison"  # Comparing entities: "X vs Y", "difference between"
     MATHEMATICAL = "mathematical"  # Math/calculations
-    CONVERSATIONAL = "conversational"  # Conversation
     CREATIVE = "creative"  # Creative tasks
     CODE = "code"  # Code-related
-    UNKNOWN = "unknown"
+    UNKNOWN = "unknown"  # Fallback category
 
 
 @dataclass
@@ -73,6 +74,7 @@ class AdaptiveSimilarityEvaluation(SimilarityEvaluation):
         model: str = None,
         device: str = None,
         threshold_rules: Optional[Dict[QueryCategory, ThresholdRule]] = None,
+        threshold_overrides: Optional[Dict[str, Dict[str, float]]] = None,
     ):
         """
         Initialize with adaptive config and embedding model.
@@ -81,7 +83,10 @@ class AdaptiveSimilarityEvaluation(SimilarityEvaluation):
             config: Configuration dictionary.
             model: Huggingface model name (overrides config).
             device: Device to run model on (overrides config).
-            threshold_rules: Dict with rules per category.
+            threshold_rules: Dict with rules per category (full specification).
+            threshold_overrides: Dict to override specific categories, format:
+                {"FACTUAL": {"base": 0.89, "adj": -0.008}, "ADVICE": {"base": 0.78, "adj": -0.01}}
+                If both threshold_rules and threshold_overrides are provided, threshold_rules takes precedence.
         """
         # Get embedding config
         embedding_config = config.get("embedding", {})
@@ -95,40 +100,74 @@ class AdaptiveSimilarityEvaluation(SimilarityEvaluation):
         self.device = device_name
 
         # Base threshold for normalization
-        self.base_threshold = config.get("cache", {}).get("similarity_threshold", 0.85)
+        self.base_threshold = config.get("cache", {}).get("similarity_threshold", 0.80)
 
         self.base_evaluation = SearchDistanceEvaluation()
 
-        # Default rules
-        if threshold_rules is None:
-            threshold_rules = {
-                QueryCategory.FACTUAL: ThresholdRule(
-                    base_threshold=0.85,
-                    length_adjustment=-0.01,  # Less strict for longer questions
-                ),
-                QueryCategory.MATHEMATICAL: ThresholdRule(
-                    base_threshold=0.95,  # Very strict for math
-                    length_adjustment=0.0,  # No length adjustment
-                ),
-                QueryCategory.CONVERSATIONAL: ThresholdRule(
-                    base_threshold=0.7,  # Less strict for conversation
-                    length_adjustment=-0.015,
-                ),
-                QueryCategory.CREATIVE: ThresholdRule(
-                    base_threshold=0.6,  # Least strict
-                    length_adjustment=-0.02,
-                ),
-                QueryCategory.CODE: ThresholdRule(
-                    base_threshold=0.9,  # Strict for code
-                    length_adjustment=-0.005,
-                ),
-                QueryCategory.UNKNOWN: ThresholdRule(
-                    base_threshold=0.8,
-                    length_adjustment=-0.01,
-                ),
-            }
+        # Default rules (GPTCache-optimized baseline)
+        default_rules = {
+            QueryCategory.FACTUAL: ThresholdRule(
+                base_threshold=0.880,
+                length_adjustment=-0.010,
+                min_threshold=0.75,
+                max_threshold=0.95,
+            ),
+            QueryCategory.SUBJECTIVE: ThresholdRule(
+                base_threshold=0.850,
+                length_adjustment=-0.015,
+                min_threshold=0.70,
+                max_threshold=0.93,
+            ),
+            QueryCategory.COMPARISON: ThresholdRule(
+                base_threshold=0.890,
+                length_adjustment=-0.012,
+                min_threshold=0.78,
+                max_threshold=0.95,
+            ),
+            QueryCategory.MATHEMATICAL: ThresholdRule(
+                base_threshold=0.890,
+                length_adjustment=-0.005,
+                min_threshold=0.80,
+                max_threshold=0.95,
+            ),
+            QueryCategory.CREATIVE: ThresholdRule(
+                base_threshold=0.610,
+                length_adjustment=-0.025,
+                min_threshold=0.45,
+                max_threshold=0.80,
+            ),
+            QueryCategory.CODE: ThresholdRule(
+                base_threshold=0.910,
+                length_adjustment=-0.007,
+                min_threshold=0.85,
+                max_threshold=0.95,
+            ),
+            QueryCategory.UNKNOWN: ThresholdRule(
+                base_threshold=0.800,
+                length_adjustment=0.000,
+            ),
+        }
 
-        self.threshold_rules = threshold_rules
+        # Apply threshold logic
+        if threshold_rules is not None:
+            # Full custom rules provided - use as-is
+            self.threshold_rules = threshold_rules
+        elif threshold_overrides is not None:
+            # Start with defaults and override specific categories
+            self.threshold_rules = default_rules.copy()
+            for category_str, values in threshold_overrides.items():
+                try:
+                    category = QueryCategory[category_str.upper()]
+                    self.threshold_rules[category] = ThresholdRule(
+                        base_threshold=values.get("base", 0.80),
+                        length_adjustment=values.get("adj", 0.0),
+                    )
+                except KeyError:
+                    logger.warning(f"Unknown category '{category_str}' in threshold_overrides, skipping")
+        else:
+            # No custom config - use defaults
+            self.threshold_rules = default_rules
+
         self._query_history: Dict[str, Dict[str, Any]] = {}
 
         # Logging state
@@ -150,68 +189,164 @@ class AdaptiveSimilarityEvaluation(SimilarityEvaluation):
         """
         query_lower = query.lower()
 
-        # Mathematical queries
+        # PRIORITY 1: Mathematical queries - very specific patterns
+        # Checked first to avoid "misclassification" as FACTUAL or ADVICE
         math_patterns = [
-            r"\d+\s*[\+\-\*/]\s*\d+",
-            r"calculate",
-            r"compute",
-            r"solve",
-            r"equation",
-            r"sum",
-            r"multiply",
+            r"\d+\s*[\+\-\*/\^]\s*\d+",  # Actual math operations: "5 + 3"
+            r"\bcalculate\s+\w+",  # "calculate the..."
+            r"\bcompute\s+\w+",
+            r"\bsolve\s+(for|the|this)",
+            r"\bequation\b",
+            r"\bformula\b",
+            r"\bderivative\b",
+            r"\bintegral\b",
+            r"\bsum\s+of\s+\d+",  # "sum of 5 and 3"
+            r"\bsquare\s+root\b",
+            r"\btimes\s+\d+",  # "25 times 4"
+            r"\bmultipl(y|ied)\s+\d+",
+            r"\bdivide\s+\d+",
         ]
         if any(re.search(pattern, query_lower) for pattern in math_patterns):
             return QueryCategory.MATHEMATICAL
 
-        # Code-related queries
-        code_keywords = [
-            "function",
-            "class",
-            "code",
-            "python",
-            "javascript",
-            "programming",
-            "implement",
-            "algorithm",
-            "debug",
+        # PRIORITY 2: Comparison queries - explicit comparison patterns
+        # Check early to avoid misclassification as OPINION/CODE
+        comparison_patterns = [
+            r"\bvs\.?\b",  # "X vs Y"
+            r"\bversus\b",
+            r"\bdifference\s+between\b",
+            r"\bdifferences?\s+between\b",
+            r"\bcompare\s+\w+\s+(and|with|to)\b",
+            r"\bbetter\s+than\b",
+            r"\bworse\s+than\b",
+            r"\bsimilar(ities)?\s+(to|with)\b",
+            r"\bwhich\s+is\s+(better|worse|more|less)\b",
+            r"\b(differ|differs?)\s+(from|between)\b",  # "differ from", "differs from"
         ]
-        if any(keyword in query_lower for keyword in code_keywords):
+        if any(re.search(pattern, query_lower) for pattern in comparison_patterns):
+            return QueryCategory.COMPARISON
+
+        # PRIORITY 3: SUBJECTIVE queries (merged OPINION + ADVICE)
+        # Combines opinion-seeking and advice-seeking patterns
+        subjective_patterns = [
+            # Direct opinion/preference keywords
+            r"\bopinion\b",
+            r"\bdo\s+you\s+think\b",  # "Do you think..."
+            r"\bthink\s+(about|of|that)\b",
+            r"\bfeel\s+about\b",
+            r"\bthoughts\s+on\b",
+            r"\bfavorite\b",
+            r"\bprefer\b",
+            
+            # Recommendations
+            r"\brecommend\b",
+            r"\bsuggestion\b",
+            r"\badvice\b",
+            
+            # "Should I" with specific context
+            r"\bshould\s+i\s+(buy|get|choose|learn|start|try|go|do|use)\b",
+            r"\bis\s+it\s+worth\b",
+            r"\bworth\s+(it|buying|getting|learning)\b",
+            
+            # Comparisons (subjective evaluation)
+            r"\bwhich\s+is\s+better\b",
+            r"\bis\s+\w+\s+better\s+than\b",
+            r"\bis\s+it\s+(better|worse|good|bad)\b",
+            
+            # "Best" with specific context
+            r"\bwhat\s+is\s+the\s+best\s+(way\s+to|method|approach|option)\b",
+            r"\bbest\s+way\s+to\s+(learn|study|prepare|improve|start)\b",
+            
+            # "How do/can/should I" with personal/learning context
+            r"\bhow\s+(do|can|should)\s+i\s+(start|learn|improve|prepare|become|get)\b",
+            r"\bwhat\s+should\s+i\s+(do|learn|study|practice|use)\b",
+            
+            # Guidance/help seeking
+            r"\bguide\s+(me|for|to)\b",
+            r"\bhelp\s+me\s+(decide|choose|learn|understand)\b",
+            r"\btips\s+(for|to)\b",
+            r"\bsteps\s+to\s+(become|learn|start|get)\b",
+            r"\bways\s+to\s+(improve|learn|start)\b",
+            
+            # "How to" standalone (generic but common advice pattern)
+            r"\bhow\s+to\s+",
+            
+            # Specific advice-seeking modals
+            r"\bcan\s+you\s+(help|show|tell|explain|suggest|recommend)\b",
+            r"\bcould\s+you\s+(help|show|tell|explain)\b",
+        ]
+        if any(re.search(pattern, query_lower) for pattern in subjective_patterns):
+            return QueryCategory.SUBJECTIVE
+
+        # PRIORITY 4: Code-related queries - specific programming implementation
+        # Checked AFTER comparison/subjective to avoid false positives
+        # Only match when clearly about code implementation, not learning/comparison
+        code_keywords = [
+            "function", "method", "class", "variable", "loop", "array",
+            "algorithm", "syntax", "compile", "debug", "error message",
+            "exception", "implement", "code snippet", "api call", "library",
+        ]
+        # Require at least 2 technical code keywords
+        code_count = sum(1 for kw in code_keywords if kw in query_lower)
+        # Or very specific code-related phrases
+        specific_code = any(phrase in query_lower for phrase in [
+            "python code", "javascript code", "write a function",
+            "implement a", "code snippet", "api call", "error message",
+            "syntax error", "compile error",
+        ])
+        if code_count >= 2 or specific_code:
             return QueryCategory.CODE
 
-        # Factual questions
+        # PRIORITY 5: Factual questions - pure information seeking
+        # More lenient patterns to catch common factual questions
         fact_patterns = [
-            r"^(what|who|when|where|which)\s",
-            r"definition",
-            r"explain",
-            r"describe",
+            # "What is/are" (including contractions) - allow at word boundary, not just start
+            r"\bwhat'?s\s+(?!(the\s+)?(best|better|worst|worse))",  # "What's X?" or "What is X?"
+            r"\bwhat\s+(is|are|was|were)\s+(?!(the\s+)?(best|better|worst|worse))",
+            r"\bwhat\s+(if|about)\s+",  # "What if...", "What about..."
+            r"\bwhat\s+causes\b",  # "What causes stool color to change?"
+            r"\bwhat\s+type\s+",  # "What type of government..."
+            # "Why" questions - explanations and reasoning
+            r"\bwhy\s+(does|do|did|is|are|was|were|would|should|can|cannot)\s+",
+            r"\bwhy\s+not\b",
+            # Other question words
+            r"\bwho'?s?\s+(is|are|was|were)\s+",  # "Who's..." or "Who is..."
+            r"\bwho\s+(is|are|was|were|invented|discovered)\s+",
+            r"\bwhen\s+(did|does|is|was|were|will)\s+",  # "When did..."
+            r"\bwhere\s+(is|are|can|could|did|do)\s+",  # "Where is..."
+            r"\bwhich\s+(country|city|place|year|one)\s+",  # Geographic/temporal facts
+            # Yes/No questions seeking factual information
+            r"\bdoes\s+\w+\s+(have|offer|provide|support|work|mean|exist|make\s+sense)\b",
+            r"\bdo\s+(they|people|we|you)\s+(have|offer|provide|know)\b",
+            r"\bdid\s+\w+\s+(happen|exist|work|succeed)\b",
+            r"\bhas\s+(anyone|someone|it|this)\s+",
+            r"\bhave\s+(you|they|people)\s+(seen|tried|heard)\b",
+            r"\bis\s+there\s+(a|an|any)\s+",  # "Is there a way..."
+            r"\bis\s+it\s+possible\s+to\b",  # "Is it possible to..."
+            r"\bare\s+there\s+(any|some|many)\s+",
+            r"\bare\s+(you|they)\s+able\s+to\b",  # "Are you able to..."
+            r"\bwas\s+\w+\s+(always|originally|initially)\b",
+            r"\bwere\s+(they|these|those)\s+",
+            r"\bwill\s+\w+\s+(happen|work|be|exist)\b",
+            r"\bwould\s+\w+\s+(work|be|happen)\b",
+            # Definition patterns
+            r"\bdefine\s+\w+",  # "define X"
+            r"\bdefinition\s+of\b",
+            r"\bwhat\s+does\s+\w+\s+mean\b",  # "What does X mean?"
+            r"\bwhat\s+is\s+the\s+(capital|population|currency|meaning|purpose)\b",
         ]
         if any(re.search(pattern, query_lower) for pattern in fact_patterns):
             return QueryCategory.FACTUAL
 
-        # Creative tasks
+        # PRIORITY 7: Creative tasks - writing, generation, design
         creative_keywords = [
-            "write",
-            "create",
-            "generate",
-            "story",
-            "poem",
-            "imagine",
-            "design",
+            "write a story", "write a poem", "create a", "generate a",
+            "design a", "compose a", "imagine", "invent a",
         ]
         if any(keyword in query_lower for keyword in creative_keywords):
             return QueryCategory.CREATIVE
 
-        # Conversational (default for many short, informal requests)
-        conversational_patterns = [
-            r"^(hi|hello|hey)",
-            r"how are you",
-            r"thank",
-            r"please",
-            r"can you",
-        ]
-        if any(re.search(pattern, query_lower) for pattern in conversational_patterns):
-            return QueryCategory.CONVERSATIONAL
-
+        # All other queries fall into UNKNOWN
         return QueryCategory.UNKNOWN
 
     def _calculate_adaptive_threshold(
@@ -260,6 +395,13 @@ class AdaptiveSimilarityEvaluation(SimilarityEvaluation):
         # Determine category and calculate adaptive threshold
         category = self._classify_query(query)
         adaptive_threshold = self._calculate_adaptive_threshold(query, category)
+
+        # Debug logging
+        logger.debug(
+            f"Query: '{query[:60]}...' | Category: {category.value} | "
+            f"Threshold: {adaptive_threshold:.3f} | Similarity: {base_score:.3f} | "
+            f"Match: {base_score >= adaptive_threshold}"
+        )
 
         # Track history
         self._query_history[query] = {
@@ -336,7 +478,7 @@ class AdaptiveThresholdCache:
         cache_config = self.config.get("cache", {})
 
         model = embedding_config.get("model", "sentence-transformers/all-MiniLM-L6-v2")
-        threshold = cache_config.get("similarity_threshold", 0.85)
+        threshold = cache_config.get("similarity_threshold", 0.80)
 
         # Create embedding model instance
         model_instance = Huggingface(model)
@@ -384,7 +526,7 @@ class AdaptiveThresholdCache:
         """Get the adaptive threshold for a specific query."""
         if self.evaluator:
             return self.evaluator.get_threshold_for_query(query)
-        return 0.85
+        return 0.80
 
     def get_stats(self) -> Dict[str, Any]:
         """Return query statistics."""

@@ -68,11 +68,11 @@ class LengthBasedSimilarityEvaluation(SimilarityEvaluation):
         self.short_query_words = length_config.get("short_query_words", 5)
         self.long_query_words = length_config.get("long_query_words", 10)
         self.short_threshold = length_config.get("short_threshold", 0.92)
-        self.medium_threshold = length_config.get("medium_threshold", 0.85)
+        self.medium_threshold = length_config.get("medium_threshold", 0.80)
         self.long_threshold = length_config.get("long_threshold", 0.78)
 
         # Base threshold for normalization
-        self.base_threshold = config.get("cache", {}).get("similarity_threshold", 0.85)
+        self.base_threshold = config.get("cache", {}).get("similarity_threshold", 0.80)
 
         # Logging state
         self.last_computed_threshold = None

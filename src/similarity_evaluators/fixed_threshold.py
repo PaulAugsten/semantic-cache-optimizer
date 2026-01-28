@@ -42,7 +42,7 @@ class FixedThresholdCache:
         cache_config = self.config.get("cache", {})
 
         model = embedding_config.get("model", "sentence-transformers/all-MiniLM-L6-v2")
-        threshold = cache_config.get("similarity_threshold", 0.85)
+        threshold = cache_config.get("similarity_threshold", 0.80)
 
         # Create embedding model instance (shared between evaluator or distance evaluator)
         model_instance = Huggingface(model)

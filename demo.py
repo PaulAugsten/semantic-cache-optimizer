@@ -1,27 +1,26 @@
 #!/usr/bin/env python3
 """
-Demo script showing the semantic cache in action.
+Demo script showing the adaptive threshold system in action.
 
 This script demonstrates:
-1. Cache initialization with different strategies
-2. Making queries and observing cache hits/misses
-3. Logging threshold decisions
+1. Adaptive threshold evaluation per category
+2. Category classification
+3. Threshold adjustments based on query characteristics
 """
 import sys
 from pathlib import Path
 
 import yaml
+import numpy as np
 from loguru import logger
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.preprocessing import clean_text
-from src.similarity_evaluators import (
-    LengthBasedSimilarityEvaluation,
-    DensityBasedSimilarityEvaluation,
-    ScoreGapSimilarityEvaluation,
+from gptcache.embedding import Huggingface
+from src.similarity_evaluators.adaptive_threshold import (
+    AdaptiveSimilarityEvaluation,
+    QueryCategory,
 )
-from gptcache.similarity_evaluation import SearchDistanceEvaluation
 
 
 def load_config(path: str = "config.yaml"):
@@ -30,129 +29,129 @@ def load_config(path: str = "config.yaml"):
         return yaml.safe_load(f)
 
 
-def demo_similarity_evaluation():
-    """Demonstrate similarity evaluation with different strategies."""
+def demo_adaptive_threshold():
+    """Demonstrate adaptive threshold evaluation."""
     config = load_config()
 
-    # Example query pairs
+    # Example query pairs with different categories
     test_pairs = [
-        # Similar questions (should match)
-        ("What is the capital of France?", "What's France's capital city?"),
-        ("How do I learn Python?", "What's the best way to learn Python programming?"),
-        # Different questions (should not match)
-        ("What is the capital of France?", "What is the population of Germany?"),
-        ("How do I learn Python?", "What is machine learning?"),
-        # Short ambiguous queries
-        ("What is AI?", "What's AI?"),
-        # Longer, more specific queries
-        (
-            "Can you explain the differences between supervised and unsupervised machine learning algorithms?",
-            "What are the key differences between supervised learning and unsupervised learning in ML?",
-        ),
+        # FACTUAL queries
+        ("What is the capital of France?", "What's France's capital city?", True),
+        ("What is the capital of France?", "What is the population of Germany?", False),
+        
+        # ADVICE queries
+        ("How do I learn Python?", "What's the best way to learn Python programming?", True),
+        ("How do I learn Python?", "What is machine learning?", False),
+        
+        # OPINION queries
+        ("What do you think about climate change?", "Do you think climate change is real?", True),
+        ("What do you think about climate change?", "What is climate change?", False),
+        
+        # COMPARISON queries
+        ("What are the differences between Python and Java?", "How do Python and Java differ?", True),
+        ("What are the differences between Python and Java?", "What is the best programming language?", False),
+        
+        # MATHEMATICAL queries
+        ("What is 15 * 7?", "Calculate 15 times 7", True),
+        ("What is 15 * 7?", "What is 20 + 5?", False),
     ]
 
-    embedding_config = config.get("embedding", {})
-    model = embedding_config.get("model", "sentence-transformers/all-MiniLM-L6-v2")
-    device = embedding_config.get("device", "cpu")
+    print("\nLoading embedding model and initializing adaptive evaluator...")
+    
+    # Create adaptive evaluator
+    evaluator = AdaptiveSimilarityEvaluation(config)
+    
+    # Get embedding model for computing similarities
+    embedding_model = Huggingface(config["embedding"]["model"])
 
-    # Create evaluators - each now contains its own embedding model
-    print("\nLoading embedding models (this may take a moment)...")
+    print("\n" + "=" * 100)
+    print("ADAPTIVE THRESHOLD DEMO - CATEGORY-SPECIFIC EVALUATION")
+    print("=" * 100)
 
-    evaluators = {
-        "fixed": SearchDistanceEvaluation(),
-        "length_based": LengthBasedSimilarityEvaluation(config),
-        "density_based": DensityBasedSimilarityEvaluation(config),
-        "score_gap": ScoreGapSimilarityEvaluation(config),
-    }
+    for q1, q2, expected_similar in test_pairs:
+        # Classify queries
+        category1 = evaluator._classify_query(q1)
+        category2 = evaluator._classify_query(q2)
+        
+        # Compute embeddings
+        emb1 = np.array(embedding_model.to_embeddings(q1))
+        emb2 = np.array(embedding_model.to_embeddings(q2))
+        
+        # Normalize
+        emb1 = emb1 / np.linalg.norm(emb1)
+        emb2 = emb2 / np.linalg.norm(emb2)
+        
+        # Compute similarity
+        similarity = float(np.dot(emb1, emb2))
+        
+        # Get adaptive threshold for q1
+        threshold = evaluator._calculate_adaptive_threshold(q1, category1)
+        
+        # Determine if it would be a cache hit
+        is_similar = similarity >= threshold
+        match_status = "✓" if is_similar == expected_similar else "✗"
+        
+        print(f"\n{match_status} Q1: {q1}")
+        print(f"  Q2: {q2}")
+        print("-" * 100)
+        print(f"  Category Q1: {category1.name:15s} | Category Q2: {category2.name:15s}")
+        print(f"  Similarity:  {similarity:.4f}")
+        print(f"  Threshold:   {threshold:.4f} (adaptive for {category1.name})")
+        print(f"  Decision:    {'CACHE HIT ✓' if is_similar else 'CACHE MISS ✗':15s} | Expected: {'SIMILAR' if expected_similar else 'DIFFERENT'}")
+        
+        # Show threshold info
+        if hasattr(evaluator, 'threshold_rules') and category1 in evaluator.threshold_rules:
+            rule = evaluator.threshold_rules[category1]
+            print(f"  Threshold Rule: base={rule.base_threshold:.3f}, length_adj={rule.length_adjustment:.3f}")
 
-    threshold = config.get("cache", {}).get("similarity_threshold", 0.85)
-
-    print("\n" + "=" * 80)
-    print("SEMANTIC CACHE DEMO - SIMILARITY EVALUATION")
-    print("=" * 80)
-
-    for q1, q2 in test_pairs:
-        q1_clean = clean_text(q1)
-        q2_clean = clean_text(q2)
-
-        # Use the new dict-based interface
-        src_dict = {"question": q1_clean}
-        cache_dict = {"question": q2_clean}
-
-        print(f"\nQ1: {q1}")
-        print(f"Q2: {q2}")
-        print("-" * 60)
-
-        for name, evaluator in evaluators.items():
-            # Use new interface: evaluation(src_dict, cache_dict)
-            similarity = evaluator.evaluation(src_dict, cache_dict)
-
-            would_cache = similarity >= threshold
-            status = "✓ CACHE HIT" if would_cache else "✗ CACHE MISS"
-
-            extra_info = ""
-            if hasattr(evaluator, "get_threshold_info"):
-                info = evaluator.get_threshold_info()
-                if "computed_threshold" in info and info["computed_threshold"]:
-                    extra_info = (
-                        f" (adaptive threshold: {info['computed_threshold']:.2f})"
-                    )
-
-            print(f"  {name:15s}: {similarity:.4f} -> {status}{extra_info}")
-
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 100)
 
 
-def demo_cache_flow():
-    """Demonstrate a simple cache flow."""
-    print("\n" + "=" * 80)
-    print("CACHE FLOW DEMO")
-    print("=" * 80)
-
-    # Simulated cache behavior
-    cache = {}
-    queries = [
-        "What is machine learning?",
-        "What's ML?",  # Similar to first
-        "How does Python work?",  # Different
-        "What is machine learning exactly?",  # Similar to first
-        "Explain neural networks",  # Different
+def show_category_examples():
+    """Show examples of different query categories."""
+    config = load_config()
+    evaluator = AdaptiveSimilarityEvaluation(config)
+    
+    print("\n" + "=" * 100)
+    print("QUERY CATEGORY CLASSIFICATION DEMO")
+    print("=" * 100)
+    
+    examples = [
+        "What is the capital of France?",                                    # FACTUAL
+        "How do I learn Python programming?",                               # ADVICE
+        "What do you think about climate change?",                          # OPINION
+        "What are the differences between supervised and unsupervised ML?", # COMPARISON
+        "What is 25 times 4?",                                              # MATHEMATICAL
+        "Hello there!",                                                     # CONVERSATIONAL
+        "Write a poem about coding",                                        # CREATIVE
+        "How to implement a binary search in Python?",                     # CODE
+        "This is a test query",                                             # UNKNOWN
     ]
-
-    print("\nSimulated cache interactions:")
-    print("-" * 60)
-
-    for i, query in enumerate(queries, 1):
-        # In real implementation, this would use gptcache
-        cache_hit = query.lower().startswith("what is machine")
-
-        if cache_hit and cache:
-            print(f"{i}. '{query}'")
-            print(f"   -> CACHE HIT (returning cached response)")
-        else:
-            response = f"[LLM Response for: {query[:30]}...]"
-            cache[query] = response
-            print(f"{i}. '{query}'")
-            print(f"   -> CACHE MISS (calling LLM, storing response)")
-
-    print("\n" + "=" * 80)
+    
+    print("\nClassifying various query types:")
+    print("-" * 100)
+    
+    for query in examples:
+        category = evaluator._classify_query(query)
+        threshold = evaluator._calculate_adaptive_threshold(query, category)
+        
+        print(f"  {category.name:15s} (threshold: {threshold:.3f}) | {query}")
+    
+    print("\n" + "=" * 100)
 
 
 if __name__ == "__main__":
     logger.remove()
-    logger.add(sys.stderr, level="INFO")
+    logger.add(sys.stderr, level="WARNING")  # Suppress info logs for cleaner demo
 
-    print("\n🚀 SEMANTIC CACHING MVP DEMO")
-    print(
-        "This demonstrates similarity evaluation with different threshold strategies.\n"
-    )
+    print("\nADAPTIVE THRESHOLD SEMANTIC CACHING DEMO")
+    print("This demonstrates category-based adaptive threshold evaluation.\n")
 
     try:
-        demo_similarity_evaluation()
-        #demo_cache_flow()
+        show_category_examples()
+        demo_adaptive_threshold()
     except Exception as e:
         logger.error(f"Demo failed: {e}")
-        logger.info(
-            "Make sure to install dependencies: pip install -r requirements.txt"
-        )
-        raise
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)

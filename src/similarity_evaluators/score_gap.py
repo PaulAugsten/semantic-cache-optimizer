@@ -69,7 +69,7 @@ class ScoreGapSimilarityEvaluation(SimilarityEvaluation):
         self.large_gap_threshold = gap_config.get("large_gap_threshold", 0.78)
         self.gap_cutoff = gap_config.get("gap_cutoff", 0.1)
 
-        self.base_threshold = config.get("cache", {}).get("similarity_threshold", 0.85)
+        self.base_threshold = config.get("cache", {}).get("similarity_threshold", 0.80)
 
         # Logging state
         self.last_computed_threshold = None

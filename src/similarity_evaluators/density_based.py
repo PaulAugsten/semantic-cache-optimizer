@@ -70,7 +70,7 @@ class DensityBasedSimilarityEvaluation(SimilarityEvaluation):
         self.low_density_threshold = density_config.get("low_density_threshold", 0.80)
         self.density_cutoff = density_config.get("density_cutoff", 0.75)
 
-        self.base_threshold = config.get("cache", {}).get("similarity_threshold", 0.85)
+        self.base_threshold = config.get("cache", {}).get("similarity_threshold", 0.80)
 
         # Logging state
         self.last_computed_threshold = None

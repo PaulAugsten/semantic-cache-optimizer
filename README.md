@@ -45,7 +45,7 @@ A Python implementation of semantic caching with **adaptive, category-based thre
 ```bash
 # Clone repository
 git clone https://github.com/PaulAugsten/semantic-cache-optimizer.git
-cd implementation
+cd semantic-cache-optimizer
 
 # Install dependencies with Poetry
 poetry install

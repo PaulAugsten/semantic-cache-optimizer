@@ -1,22 +1,12 @@
 #!/usr/bin/env python3
 """
-Dataset Category Analysis Script
+Dataset Category Analysis
 
-This script analyzes the entire dataset to understand the distribution of
-query categories and their characteristics.
-
-Purpose:
-- Understand category distribution across the dataset
-- Identify which categories are meaningful for threshold adaptation
-- Provide statistics for category-based strategy design
+Analyzes the distribution of query categories across the dataset
+and provides statistics for category-based caching strategies.
 
 Usage:
     poetry run python evaluation/analyze_dataset_categories.py
-
-Output:
-- JSON with detailed category statistics
-- Markdown report with category breakdown
-- Insights on category-specific duplicate rates
 """
 
 import sys
@@ -36,7 +26,7 @@ from collections import defaultdict
 from datasets import load_dataset
 
 # Import from gptcache and src
-from src.similarity_evaluators.adaptive_threshold import (
+from src.adaptive_threshold import (
     AdaptiveSimilarityEvaluation,
     QueryCategory,
 )
@@ -44,7 +34,7 @@ from src.similarity_evaluators.adaptive_threshold import (
 
 @dataclass
 class CategoryStats:
-    """Statistics for a single category"""
+    """Statistics for a single category."""
     category: str
     total_count: int
     percentage: float
@@ -57,7 +47,7 @@ class CategoryStats:
 
 
 def load_config(config_path: str = "config.yaml") -> dict:
-    """Load configuration from YAML file"""
+    """Load configuration from YAML file."""
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
 
@@ -69,13 +59,13 @@ def analyze_categories(
     evaluator: AdaptiveSimilarityEvaluation
 ) -> List[CategoryStats]:
     """
-    Analyze category distribution and statistics
+    Analyze category distribution and statistics.
     
     Args:
         questions1: First questions
         questions2: Second questions
         labels: Ground truth labels (1=duplicate, 0=not duplicate)
-        evaluator: AdaptiveSimilarityEvaluation instance for classification
+        evaluator: AdaptiveSimilarityEvaluation instance
     
     Returns:
         List of CategoryStats for each category
@@ -91,7 +81,7 @@ def analyze_categories(
     # Classify all questions
     logger.info("Classifying questions by category...")
     for q1, q2, label in tqdm(zip(questions1, questions2, labels), total=len(labels)):
-        # Classify based on first question (primary query)
+        # Classify based on first question
         category = evaluator._classify_query(q1)
         category_name = category.name
         
@@ -133,7 +123,7 @@ def analyze_categories(
 
 
 def save_results(stats: List[CategoryStats], output_dir: Path, num_samples: int):
-    """Save results to JSON and Markdown files"""
+    """Save results to JSON and Markdown files."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     # Save JSON
@@ -204,7 +194,6 @@ def save_results(stats: List[CategoryStats], output_dir: Path, num_samples: int)
         
         if high_dup_cats:
             f.write(f"### Categories with High Duplicate Rate (>{avg_dup_rate*1.2:.1f}%)\n\n")
-            f.write("These categories might benefit from **lower thresholds** (more aggressive caching):\n\n")
             for stat in high_dup_cats:
                 f.write(f"- **{stat.category}**: {stat.duplicate_rate:.1f}% duplicates "
                         f"({stat.total_count} samples)\n")
@@ -212,7 +201,6 @@ def save_results(stats: List[CategoryStats], output_dir: Path, num_samples: int)
         
         if low_dup_cats:
             f.write(f"### Categories with Low Duplicate Rate (<{avg_dup_rate*0.8:.1f}%)\n\n")
-            f.write("These categories might benefit from **higher thresholds** (more conservative caching):\n\n")
             for stat in low_dup_cats:
                 f.write(f"- **{stat.category}**: {stat.duplicate_rate:.1f}% duplicates "
                         f"({stat.total_count} samples)\n")
@@ -228,97 +216,50 @@ def save_results(stats: List[CategoryStats], output_dir: Path, num_samples: int)
                 f.write(f"- {stat.category}: {stat.total_count} samples ({stat.percentage:.2f}%)\n")
             f.write("\n")
             f.write("**Note:** These categories may not have enough samples for reliable threshold tuning.\n\n")
-        
-        # Recommendations
-        f.write("## Recommendations for Adaptive Thresholding\n\n")
-        
-        major_cats = [s for s in stats if s.percentage >= 5.0]
-        f.write(f"### Focus on Major Categories ({len(major_cats)} categories, "
-                f"{sum(s.percentage for s in major_cats):.1f}% of data)\n\n")
-        
-        for stat in major_cats:
-            if stat.duplicate_rate > avg_dup_rate * 1.1:
-                recommendation = f"**Lower threshold** (more caching, high duplicate rate: {stat.duplicate_rate:.1f}%)"
-            elif stat.duplicate_rate < avg_dup_rate * 0.9:
-                recommendation = f"**Higher threshold** (less caching, low duplicate rate: {stat.duplicate_rate:.1f}%)"
-            else:
-                recommendation = f"**Standard threshold** (balanced, duplicate rate: {stat.duplicate_rate:.1f}%)"
-            
-            f.write(f"- **{stat.category}** ({stat.percentage:.1f}% of dataset): {recommendation}\n")
-        
-        f.write("\n### Handle Rare Categories\n\n")
-        f.write("For categories with <1% of dataset:\n")
-        f.write("- Use **UNKNOWN** category as fallback\n")
-        f.write("- Apply conservative (higher) thresholds to avoid false positives\n")
-        f.write("- Consider merging similar rare categories\n")
     
     logger.info(f"Markdown report saved to: {md_path}")
 
 
-def main():
-    """Main execution function"""
-    logger.info("=" * 80)
-    logger.info("Dataset Category Analysis")
-    logger.info("=" * 80)
-    
-    # Load config
-    config = load_config()
-    seed = config.get('seed', 42)
-    max_samples = config.get('max_eval_samples', 10000)
+def load_and_prepare_data(config: dict) -> tuple:
+    """Load dataset and prepare evaluator."""
     model_name = config['embedding']['model']
     
-    logger.info("Configuration:")
-    logger.info(f"  - Max samples: {max_samples}")
-    logger.info(f"  - Seed: {seed}")
-    logger.info(f"  - Model: {model_name}")
-    
-    # Load dataset - use TRAIN split for full dataset analysis
-    logger.info("\nLoading QQP dataset (TRAIN split for complete analysis)...")
+    logger.info("Loading QQP dataset (TRAIN split)...")
     dataset = load_dataset("nyu-mll/glue", "qqp", split="train")
-    
-    # Don't limit samples - use full dataset for comprehensive analysis
     logger.info(f"Full dataset loaded: {len(dataset)} pairs")
     
     questions1 = [q for q in dataset['question1']]
     questions2 = [q for q in dataset['question2']]
     labels = [int(label) for label in dataset['label']]
     
-    logger.info(f"Dataset loaded: {len(labels)} pairs")
-    
-    # Initialize evaluator (we only need the classifier, not embeddings)
-    logger.info("\nInitializing category classifier...")
+    logger.info("Initializing category classifier...")
     base_config = {
         'similarity_threshold': 0.80,
         'embedding': {'model': model_name}
     }
     evaluator = AdaptiveSimilarityEvaluation(
         config=base_config,
-        threshold_rules={}  # No rules needed, just for classification
+        threshold_rules={}
     )
     
-    # Analyze categories
-    stats = analyze_categories(questions1, questions2, labels, evaluator)
-    
-    # Save results
-    output_dir = Path(__file__).parent / "results"
-    output_dir.mkdir(exist_ok=True)
-    
-    save_results(stats, output_dir, len(labels))
-    
-    # Print summary with clean logging
+    return questions1, questions2, labels, evaluator
+
+
+def print_summary(stats: List[CategoryStats], num_samples: int):
+    """Print analysis summary to console."""
     logger.info("")
-    logger.info("=" * 100)
+    logger.info("=" * 95)
     logger.info("CATEGORY ANALYSIS SUMMARY")
-    logger.info("=" * 100)
+    logger.info("=" * 95)
     logger.info("")
-    logger.info(f"Total Samples Analyzed: {len(labels):,}")
+    logger.info(f"Total Samples Analyzed: {num_samples:,}")
     logger.info(f"Total Categories Found: {len(stats)}")
     logger.info("")
     
     # Calculate overall stats
     total_duplicates = sum(s.duplicate_count for s in stats)
     total_non_duplicates = sum(s.non_duplicate_count for s in stats)
-    overall_dup_rate = total_duplicates / len(labels) * 100
+    overall_dup_rate = total_duplicates / num_samples * 100
     
     logger.info("Overall Dataset Statistics:")
     logger.info(f"  • Duplicates:     {total_duplicates:>7,} ({overall_dup_rate:>5.1f}%)")
@@ -327,20 +268,18 @@ def main():
     
     # Print all categories
     logger.info("All Categories (sorted by frequency):")
-    logger.info("-" * 100)
+    logger.info("-" * 95)
     
     # Column widths
-    marker_w = 5
-    rank_w = 4
+    rank_w = 6
     cat_w = 18
-    count_w = 11
-    pct_w = 10
-    dup_w = 12
-    rate_w = 10
-    len_w = 10
+    count_w = 15
+    pct_w = 12
+    dup_w = 15
+    rate_w = 12
+    len_w = 12
     
     header = (
-        f"{'':>{marker_w}}"
         f"{'Rank':<{rank_w}}"
         f"{'Category':<{cat_w}}"
         f"{'Count':>{count_w}}"
@@ -350,12 +289,9 @@ def main():
         f"{'Avg Len':>{len_w}}"
     )
     logger.info(header)
-    logger.info("-" * 100)
+    logger.info("-" * 95)
     
     for i, stat in enumerate(stats, 1):
-        # Mark major categories
-        marker = "[M]" if stat.percentage >= 10.0 else ("[S]" if stat.percentage >= 5.0 else "   ")
-        
         count_str = f"{stat.total_count:,}"
         pct_str = f"{stat.percentage:.1f}%"
         dup_str = f"{stat.duplicate_count:,}"
@@ -363,7 +299,6 @@ def main():
         len_str = f"{stat.avg_combined_length:.1f}w"
         
         row = (
-            f"{marker:>{marker_w}}"
             f"{i:<{rank_w}}"
             f"{stat.category:<{cat_w}}"
             f"{count_str:>{count_w}}"
@@ -374,22 +309,20 @@ def main():
         )
         logger.info(row)
     
-    logger.info("-" * 100)
+    logger.info("-" * 95)
     logger.info("")
     
     # Key insights
-    significant_cats = [s for s in stats if 1.0 <= s.percentage < 5.0]
+    major_cats = [s for s in stats if s.percentage >= 10.0]
+    significant_cats = [s for s in stats if 5.0 <= s.percentage < 10.0]
+    minor_cats = [s for s in stats if 1.0 <= s.percentage < 5.0]
     rare_cats = [s for s in stats if s.percentage < 1.0]
     
     logger.info("Category Groups:")
-    logger.info(f"  [M] Major (>=10%):      {len([s for s in stats if s.percentage >= 10.0])} categories, "
-               f"covering {sum(s.percentage for s in stats if s.percentage >= 10.0):.1f}% of data")
-    logger.info(f"  [S] Significant (5-10%): {len([s for s in stats if 5.0 <= s.percentage < 10.0])} categories, "
-               f"covering {sum(s.percentage for s in stats if 5.0 <= s.percentage < 10.0):.1f}% of data")
-    logger.info(f"      Minor (1-5%):      {len(significant_cats)} categories, "
-               f"covering {sum(s.percentage for s in significant_cats):.1f}% of data")
-    logger.info(f"      Rare (<1%):        {len(rare_cats)} categories, "
-               f"covering {sum(s.percentage for s in rare_cats):.1f}% of data")
+    logger.info(f"  Major (>=10%):        {len(major_cats)} categories, covering {sum(s.percentage for s in major_cats):.1f}% of data")
+    logger.info(f"  Significant (5-10%):  {len(significant_cats)} categories, covering {sum(s.percentage for s in significant_cats):.1f}% of data")
+    logger.info(f"  Minor (1-5%):         {len(minor_cats)} categories, covering {sum(s.percentage for s in minor_cats):.1f}% of data")
+    logger.info(f"  Rare (<1%):           {len(rare_cats)} categories, covering {sum(s.percentage for s in rare_cats):.1f}% of data")
     logger.info("")
     
     # Duplicate rate analysis
@@ -408,7 +341,25 @@ def main():
             logger.info(f"  • {stat.category:<18} {stat.duplicate_rate:>5.1f}% duplicates ({stat.total_count:,} samples)")
         logger.info("")
     
-    logger.info("=" * 100)
+    logger.info("=" * 95)
+
+
+def main():
+    """Main execution function."""
+    logger.info("=" * 95)
+    logger.info("Dataset Category Analysis")
+    logger.info("=" * 95)
+    
+    config = load_config()
+    questions1, questions2, labels, evaluator = load_and_prepare_data(config)
+    
+    stats = analyze_categories(questions1, questions2, labels, evaluator)
+    
+    output_dir = Path(__file__).parent / "results"
+    output_dir.mkdir(exist_ok=True)
+    save_results(stats, output_dir, len(labels))
+    
+    print_summary(stats, len(labels))
 
 
 if __name__ == "__main__":

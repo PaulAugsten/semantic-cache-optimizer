@@ -1,15 +1,18 @@
 """
-Extended Experiment Tracking for Adaptive Threshold Configurations.
+Extended Experiment Runner for Adaptive Threshold Configurations.
 
-This script runs multiple configurations with:
-- Larger sample sizes (5000-10000+)
-- More configurations based on previous analysis
-- Timestamped output directories
-- Comprehensive result tracking
+Runs multiple threshold configurations with comprehensive result tracking.
+Configuration (sample size, embedding model, etc.) is defined in config.yaml.
+
+Usage:
+    poetry run python evaluation/run_experiments_extended.py [--verbose-errors]
+    
+    --verbose-errors: Print detailed error analysis for each configuration
 """
 
 import yaml
 import json
+import argparse
 import numpy as np
 from datasets import load_dataset
 from loguru import logger
@@ -21,7 +24,7 @@ from dataclasses import dataclass, field
 from sklearn.metrics import roc_auc_score, average_precision_score
 
 from gptcache.embedding import Huggingface
-from src.similarity_evaluators.adaptive_threshold import (
+from src.adaptive_threshold import (
     AdaptiveSimilarityEvaluation,
     QueryCategory,
 )
@@ -66,7 +69,7 @@ class ExperimentConfig:
     
     name: str
     description: str
-    thresholds: Dict[str, Dict[str, float]]  # category -> {base_threshold, length_adjustment}
+    thresholds: Dict[str, Dict[str, float]]
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -126,22 +129,15 @@ class ExperimentResult:
 
 def create_experiment_configs() -> List[ExperimentConfig]:
     """
-    Create experiment configurations for adaptive threshold evaluation.
+    Create experiment configurations for threshold evaluation.
     
-    This function defines 5 distinct threshold configurations:
-    1. fixed_baseline: Standard GPTCache threshold (0.80) for all categories
-    2. precision_focused: Higher thresholds to minimize false positives
-    3. adaptive_category_tuned: Moderate thresholds for balanced performance
-    4. balanced_hybrid: Optimized for equal precision and recall
-    5. length_weighted: Adjusted thresholds based on query length
-    
-    Each configuration specifies base thresholds and length adjustments per category.
-    The UNKNOWN category maintains 0.80 threshold for GPTCache compatibility.
+    Defines 9 configurations: baseline, precision-focused, adaptive,
+    balanced, and length-weighted variants (with/without adjustments).
     """
     
     configs = []
     
-    # 1. Fixed Baseline - Reference configuration
+    # 1. Fixed Baseline
     configs.append(ExperimentConfig(
         name="fixed_baseline",
         description="Fixed threshold of 0.80 for all queries (GPTCache standard baseline)",
@@ -156,10 +152,25 @@ def create_experiment_configs() -> List[ExperimentConfig]:
         }
     ))
     
-    # 2. Precision Focused - Minimize false positives
+    # 2a. Precision Focused - WITHOUT length adjustments
     configs.append(ExperimentConfig(
-        name="precision_focused",
-        description="Precision-optimized: Higher thresholds to reduce false positives",
+        name="precision_focused_no_adj",
+        description="Quality-first approach without length adjustments",
+        thresholds={
+            "FACTUAL": {"base": 0.90, "adj": 0.0},
+            "SUBJECTIVE": {"base": 0.89, "adj": 0.0},
+            "COMPARISON": {"base": 0.91, "adj": 0.0},
+            "MATHEMATICAL": {"base": 0.89, "adj": 0.0},
+            "CREATIVE": {"base": 0.85, "adj": 0.0},
+            "CODE": {"base": 0.92, "adj": 0.0},
+            "UNKNOWN": {"base": 0.80, "adj": 0.0},
+        }
+    ))
+    
+    # 2b. Precision Focused - WITH length adjustments
+    configs.append(ExperimentConfig(
+        name="precision_focused_with_adj",
+        description="Quality-first with weak length adjustments for comparison",
         thresholds={
             "FACTUAL": {"base": 0.90, "adj": -0.003},
             "SUBJECTIVE": {"base": 0.89, "adj": -0.005},
@@ -171,25 +182,25 @@ def create_experiment_configs() -> List[ExperimentConfig]:
         }
     ))
     
-    # 3. Adaptive Category Tuned - Balanced approach
+    # 3a. Balanced Hybrid - WITHOUT length adjustments
     configs.append(ExperimentConfig(
-        name="adaptive_category_tuned",
-        description="Balanced thresholds with moderate length adjustments",
+        name="balanced_hybrid_no_adj",
+        description="Balanced precision/recall trade-off without length adjustments",
         thresholds={
-            "FACTUAL": {"base": 0.85, "adj": -0.020},
-            "SUBJECTIVE": {"base": 0.80, "adj": -0.035},
-            "COMPARISON": {"base": 0.85, "adj": -0.025},
-            "MATHEMATICAL": {"base": 0.87, "adj": -0.015},
-            "CREATIVE": {"base": 0.55, "adj": -0.035},
-            "CODE": {"base": 0.87, "adj": -0.020},
+            "FACTUAL": {"base": 0.87, "adj": 0.0},
+            "SUBJECTIVE": {"base": 0.85, "adj": 0.0},
+            "COMPARISON": {"base": 0.88, "adj": 0.0},
+            "MATHEMATICAL": {"base": 0.91, "adj": 0.0},
+            "CREATIVE": {"base": 0.60, "adj": 0.0},
+            "CODE": {"base": 0.91, "adj": 0.0},
             "UNKNOWN": {"base": 0.80, "adj": 0.0},
         }
     ))
     
-    # 4. Balanced Hybrid - Optimize F1 Score
+    # 3b. Balanced Hybrid - WITH length adjustments
     configs.append(ExperimentConfig(
-        name="balanced_hybrid",
-        description="Balanced approach optimizing for equal precision and recall",
+        name="balanced_hybrid_with_adj",
+        description="Balanced approach with moderate length adjustments",
         thresholds={
             "FACTUAL": {"base": 0.87, "adj": -0.008},
             "SUBJECTIVE": {"base": 0.85, "adj": -0.015},
@@ -201,10 +212,55 @@ def create_experiment_configs() -> List[ExperimentConfig]:
         }
     ))
     
-    # 5. length_weighted - Length-based adjustments
+    # 4a. Adaptive Category Tuned - WITHOUT length adjustments
     configs.append(ExperimentConfig(
-        name="length_weighted",
-        description="Length-based adjustments (longer queries receive more lenient thresholds)",
+        name="adaptive_category_tuned_no_adj",
+        description="Coverage-first approach without length adjustments",
+        thresholds={
+            "FACTUAL": {"base": 0.85, "adj": 0.0},
+            "SUBJECTIVE": {"base": 0.80, "adj": 0.0},
+            "COMPARISON": {"base": 0.85, "adj": 0.0},
+            "MATHEMATICAL": {"base": 0.87, "adj": 0.0},
+            "CREATIVE": {"base": 0.55, "adj": 0.0},
+            "CODE": {"base": 0.87, "adj": 0.0},
+            "UNKNOWN": {"base": 0.80, "adj": 0.0},
+        }
+    ))
+    
+    # 4b. Adaptive Category Tuned - WITH length adjustments
+    configs.append(ExperimentConfig(
+        name="adaptive_category_tuned_with_adj",
+        description="Coverage-first with strong length adjustments",
+        thresholds={
+            "FACTUAL": {"base": 0.85, "adj": -0.020},
+            "SUBJECTIVE": {"base": 0.80, "adj": -0.035},
+            "COMPARISON": {"base": 0.85, "adj": -0.025},
+            "MATHEMATICAL": {"base": 0.87, "adj": -0.015},
+            "CREATIVE": {"base": 0.55, "adj": -0.035},
+            "CODE": {"base": 0.87, "adj": -0.020},
+            "UNKNOWN": {"base": 0.80, "adj": 0.0},
+        }
+    ))
+        
+    # 5a. Length Weighted - WITHOUT length adjustments
+    configs.append(ExperimentConfig(
+        name="length_weighted_no_adj",
+        description="Length-optimized base thresholds without adjustments",
+        thresholds={
+            "FACTUAL": {"base": 0.88, "adj": 0.0},
+            "SUBJECTIVE": {"base": 0.86, "adj": 0.0},
+            "COMPARISON": {"base": 0.88, "adj": 0.0},
+            "MATHEMATICAL": {"base": 0.91, "adj": 0.0},
+            "CREATIVE": {"base": 0.62, "adj": 0.0},
+            "CODE": {"base": 0.92, "adj": 0.0},
+            "UNKNOWN": {"base": 0.80, "adj": 0.0},
+        }
+    ))
+    
+    # 5b. Length Weighted - WITH length adjustments
+    configs.append(ExperimentConfig(
+        name="length_weighted_with_adj",
+        description="Strong length-based adjustments",
         thresholds={
             "FACTUAL": {"base": 0.88, "adj": -0.015},
             "SUBJECTIVE": {"base": 0.86, "adj": -0.025},
@@ -393,14 +449,14 @@ def print_results_table(results: List[ExperimentResult]) -> None:
     # Sort by F1 score
     sorted_results = sorted(results, key=lambda r: r.f1_score, reverse=True)
     
-    print("\n" + "=" * 140)
+    print("\n" + "=" * 108)
     print(" " * 55 + "EXPERIMENT RESULTS SUMMARY")
-    print("=" * 140)
+    print("=" * 108)
     print()
     
     # Main metrics table
     print("Overall Metrics:")
-    print("-" * 140)
+    print("-" * 108)
     
     # Column widths
     rank_w = 6
@@ -428,7 +484,7 @@ def print_results_table(results: List[ExperimentResult]) -> None:
         f"{'PR-AUC':>{pr_w}}"
     )
     print(header)
-    print("-" * 150)
+    print("-" * 108)
     
     for i, result in enumerate(sorted_results, 1):
         rank_str = f"{i}"
@@ -450,7 +506,7 @@ def print_results_table(results: List[ExperimentResult]) -> None:
         )
         print(row)
     
-    print("=" * 150)
+    print("=" * 108)
     print()
     
     # Find baseline for comparison
@@ -461,7 +517,7 @@ def print_results_table(results: List[ExperimentResult]) -> None:
     
     # Best configurations summary (sorted by precision)
     print("Best Configurations (Sorted by Precision - FP errors are more costly):")
-    print("-" * 150)
+    print("-" * 108)
     
     # Show all non-baseline configs (should be 4 configs)
     non_baseline = [r for r in sorted_by_precision if r.config.name != "fixed_baseline"]
@@ -483,12 +539,12 @@ def print_results_table(results: List[ExperimentResult]) -> None:
                   f"Recall={result.recall:.4f}")
     
     if baseline:
-        print(f"\n  📊 Baseline (fixed_baseline):     "
+        print(f"\n  Baseline (fixed_baseline):     "
               f"Prec={baseline.precision:.4f}, "
               f"F1={baseline.f1_score:.4f}, "
               f"Recall={baseline.recall:.4f}")
     
-    print("-" * 150)
+    print("-" * 108)
     print()
 
 
@@ -496,7 +552,7 @@ def print_category_breakdown(result: ExperimentResult) -> None:
     """Print per-category metrics for a configuration."""
     
     print(f"\nCategory Breakdown for: {result.config.name}")
-    print("=" * 150)
+    print("=" * 108)
     
     # Sort categories by count (descending)
     sorted_cats = sorted(result.category_metrics, key=lambda c: c.count, reverse=True)
@@ -528,7 +584,7 @@ def print_category_breakdown(result: ExperimentResult) -> None:
         f"{'FN':>{fn_w}}"
     )
     print(header)
-    print("-" * 150)
+    print("-" * 108)
     
     for cat_metric in sorted_cats:
         if cat_metric.count == 0:
@@ -552,22 +608,30 @@ def print_category_breakdown(result: ExperimentResult) -> None:
         )
         print(row)
     
-    print("=" * 150)
+    print("=" * 108)
     print()
 
 
-def print_error_analysis(result: ExperimentResult) -> None:
-    """Print detailed error analysis with FP and FN distribution."""
+def print_error_analysis(result: ExperimentResult, verbose: bool = False) -> None:
+    """Print error analysis with FP and FN distribution.
     
-    print(f"\n{'='*140}")
+    Args:
+        result: Experiment result to analyze.
+        verbose: If True, print detailed FP/FN tables. If False, only print summary.
+    """
+    
+    if not verbose:
+        return
+    
+    print(f"\n{'='*108}")
     print(f"ERROR ANALYSIS for: {result.config.name}")
-    print(f"{'='*140}\n")
+    print(f"{'='*108}\n")
     
     # Overall error summary
     total_errors = result.false_positives + result.false_negatives
     error_rate = total_errors / result.num_samples if result.num_samples > 0 else 0
     
-    print(f"Overall Error Summary:")
+    print("Overall Error Summary:")
     print(f"  Total Errors:        {total_errors:,} ({error_rate*100:.2f}% of {result.num_samples:,} samples)")
     print(f"  False Positives:     {result.false_positives:,} ({result.false_positive_rate*100:.2f}% FPR)")
     print(f"  False Negatives:     {result.false_negatives:,} (missed {result.false_negatives} duplicates)")
@@ -585,15 +649,15 @@ def print_error_analysis(result: ExperimentResult) -> None:
     active_cats = [c for c in sorted_cats if c.count > 0]
     
     # FP Analysis
-    print(f"FALSE POSITIVE Analysis (Wrong Cache Hits - Returned incorrect answer):")
-    print(f"{'-'*140}")
+    print("FALSE POSITIVE Analysis (Wrong Cache Hits - Returned incorrect answer):")
+    print(f"{'-'*108}")
     
     # Calculate total FP
     total_fp = sum(c.false_positives for c in active_cats)
     
     if total_fp > 0:
         print(f"{'Category':<20} {'Count':>12} {'FP':>8} {'FP%':>8} {'FPR':>8} {'Contrib':>10} {'Impact'}")
-        print(f"{'-'*140}")
+        print(f"{'-'*108}")
         
         # Sort by FP count descending
         fp_sorted = sorted(active_cats, key=lambda c: c.false_positives, reverse=True)
@@ -606,13 +670,13 @@ def print_error_analysis(result: ExperimentResult) -> None:
                 
                 # Impact assessment
                 if fpr_pct > 20:
-                    impact = "🔴 CRITICAL"
+                    impact = "CRITICAL"
                 elif fpr_pct > 10:
-                    impact = "🟡 HIGH"
+                    impact = "HIGH"
                 elif fpr_pct > 5:
-                    impact = "🟢 MODERATE"
+                    impact = "MODERATE"
                 else:
-                    impact = "⚪ LOW"
+                    impact = "LOW"
                 
                 print(f"{cat.category:<20} {cat.count:>12,} {cat.false_positives:>8} "
                       f"{pct_of_cat:>7.1f}% {fpr_pct:>7.2f}% {contrib:>9.1f}% {impact}")
@@ -622,15 +686,15 @@ def print_error_analysis(result: ExperimentResult) -> None:
     print()
     
     # FN Analysis
-    print(f"FALSE NEGATIVE Analysis (Missed Cache Hits - Missed duplicates):")
-    print(f"{'-'*140}")
+    print("FALSE NEGATIVE Analysis (Missed Cache Hits - Missed duplicates):")
+    print(f"{'-'*108}")
     
     # Calculate total FN
     total_fn = sum(c.false_negatives for c in active_cats)
     
     if total_fn > 0:
         print(f"{'Category':<20} {'Count':>12} {'FN':>8} {'FN%':>8} {'FNR':>8} {'Contrib':>10} {'Impact'}")
-        print(f"{'-'*140}")
+        print(f"{'-'*108}")
         
         # Sort by FN count descending
         fn_sorted = sorted(active_cats, key=lambda c: c.false_negatives, reverse=True)
@@ -643,13 +707,13 @@ def print_error_analysis(result: ExperimentResult) -> None:
                 
                 # Impact assessment
                 if fnr_pct > 20:
-                    impact = "🔴 CRITICAL"
+                    impact = "CRITICAL"
                 elif fnr_pct > 10:
-                    impact = "🟡 HIGH"
+                    impact = "HIGH"
                 elif fnr_pct > 5:
-                    impact = "🟢 MODERATE"
+                    impact = "MODERATE"
                 else:
-                    impact = "⚪ LOW"
+                    impact = "LOW"
                 
                 print(f"{cat.category:<20} {cat.count:>12,} {cat.false_negatives:>8} "
                       f"{pct_of_cat:>7.1f}% {fnr_pct:>7.2f}% {contrib:>9.1f}% {impact}")
@@ -659,27 +723,27 @@ def print_error_analysis(result: ExperimentResult) -> None:
     print()
     
     # Key Insights
-    print(f"KEY INSIGHTS:")
-    print(f"{'-'*140}")
+    print("KEY INSIGHTS:")
+    print(f"{'-'*108}")
     
     # Find problematic categories
     high_fpr_cats = [c for c in active_cats if c.false_positive_rate > 0.10]
     high_fnr_cats = [c for c in active_cats if c.false_negative_rate > 0.10]
     
     if high_fpr_cats:
-        print(f"  ⚠️  HIGH FP RATE (>10%):")
+        print("  HIGH FP RATE (>10%):")
         for c in high_fpr_cats:
-            print(f"     - {c.category}: {c.false_positive_rate*100:.1f}% FPR → Consider RAISING threshold")
+            print(f"     - {c.category}: {c.false_positive_rate*100:.1f}% FPR")
     
     if high_fnr_cats:
-        print(f"  ⚠️  HIGH FN RATE (>10%):")
+        print("  HIGH FN RATE (>10%):")
         for c in high_fnr_cats:
-            print(f"     - {c.category}: {c.false_negative_rate*100:.1f}% FNR → Consider LOWERING threshold")
+            print(f"     - {c.category}: {c.false_negative_rate*100:.1f}% FNR")
     
     if not high_fpr_cats and not high_fnr_cats:
-        print(f"  ✅ No categories with critical error rates (all <10%)")
+        print("  All categories have acceptable error rates (<10%)")
     
-    print(f"{'='*140}\n")
+    print(f"{'='*108}\n")
 
 
 def save_results(
@@ -884,26 +948,8 @@ def save_results(
 
 
 
-def main():
-    """Run all experiments."""
-    
-    # Get script directory and go to project root
-    script_dir = Path(__file__).parent
-    project_root = script_dir.parent
-    
-    # Load configuration from project root
-    config_path = project_root / "config.yaml"
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-    
-    num_samples = config["max_eval_samples"]
-    logger.info(f"Running experiments with {num_samples} samples")
-    
-    # Create output directory with timestamp (relative to script location)
-    output_dir = script_dir / "results"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Load dataset
+def load_dataset_and_generate_embeddings(config: dict, num_samples: int) -> tuple:
+    """Load dataset and generate embeddings."""
     logger.info("Loading QQP dataset...")
     dataset = load_dataset("nyu-mll/glue", "qqp", split="validation")
     pairs = []
@@ -914,11 +960,8 @@ def main():
             "is_duplicate": bool(item["label"]),
         })
     
-    # Generate embeddings once
     logger.info("Generating embeddings...")
-    embedding_model = Huggingface(
-        model=config["embedding"]["model"],
-    )
+    embedding_model = Huggingface(model=config["embedding"]["model"])
     
     questions1 = [p["question1"] for p in pairs]
     questions2 = [p["question2"] for p in pairs]
@@ -926,16 +969,16 @@ def main():
     embeddings1 = np.array([embedding_model.to_embeddings(q) for q in tqdm(questions1, desc="Embedding Q1")])
     embeddings2 = np.array([embedding_model.to_embeddings(q) for q in tqdm(questions2, desc="Embedding Q2")])
     
-    # Normalize embeddings
+    # Normalize
     embeddings1 = embeddings1 / np.linalg.norm(embeddings1, axis=1, keepdims=True)
     embeddings2 = embeddings2 / np.linalg.norm(embeddings2, axis=1, keepdims=True)
     
-    # Create experiment configurations
-    logger.info("Creating experiment configurations...")
-    configs = create_experiment_configs()
-    logger.info(f"Testing {len(configs)} configurations")
-    
-    # Run experiments
+    return pairs, embeddings1, embeddings2
+
+
+def run_experiments(configs: List[ExperimentConfig], pairs: list, embeddings1: np.ndarray, 
+                   embeddings2: np.ndarray, base_config: dict) -> List[ExperimentResult]:
+    """Run all experiment configurations."""
     results = []
     for config_obj in configs:
         result = evaluate_configuration(
@@ -943,11 +986,10 @@ def main():
             pairs=pairs,
             embeddings1=embeddings1,
             embeddings2=embeddings2,
-            base_config=config,
+            base_config=base_config,
         )
         results.append(result)
         
-        # Quick summary after each config
         logger.info(
             f"{config_obj.name:30s} | "
             f"F1={result.f1_score:.4f} | "
@@ -957,23 +999,61 @@ def main():
             f"ROC-AUC={result.roc_auc:.4f}"
         )
     
-    # Save results
-    save_results(results, output_dir, num_samples)
+    return results
+
+
+def print_detailed_results(results: List[ExperimentResult], verbose_errors: bool = False):
+    """Print detailed category breakdown for all configurations.
     
-    # Print detailed results table
-    print_results_table(results)
+    Args:
+        results: List of experiment results.
+        verbose_errors: If True, print detailed error analysis for each config.
+    """
+    print("\n" + "=" * 108)
+    print(" " * 25 + "DETAILED CATEGORY BREAKDOWN - ALL CONFIGURATIONS")
+    print("=" * 108)
     
-    # Print category breakdown for all configurations
-    print("\n" + "=" * 150)
-    print(" " * 50 + "DETAILED CATEGORY BREAKDOWN - ALL CONFIGURATIONS")
-    print("=" * 150)
-    
-    # Sort by precision (most important metric) and show all
     sorted_by_precision = sorted(results, key=lambda r: r.precision, reverse=True)
     
     for i, result in enumerate(sorted_by_precision, 1):
         print_category_breakdown(result)
-        print_error_analysis(result)
+        print_error_analysis(result, verbose=verbose_errors)
+
+
+def main():
+    """Run all experiments."""
+    parser = argparse.ArgumentParser(description="Run adaptive threshold experiments")
+    parser.add_argument(
+        "--verbose-errors",
+        action="store_true",
+        help="Print detailed error analysis for each configuration"
+    )
+    args = parser.parse_args()
+    
+    script_dir = Path(__file__).parent
+    project_root = script_dir.parent
+    
+    config_path = project_root / "config.yaml"
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+    
+    num_samples = config["max_eval_samples"]
+    logger.info(f"Running experiments with {num_samples} samples")
+    
+    output_dir = script_dir / "results"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    pairs, embeddings1, embeddings2 = load_dataset_and_generate_embeddings(config, num_samples)
+    
+    logger.info("Creating experiment configurations...")
+    configs = create_experiment_configs()
+    logger.info(f"Testing {len(configs)} configurations")
+    
+    results = run_experiments(configs, pairs, embeddings1, embeddings2, config)
+    
+    save_results(results, output_dir, num_samples)
+    print_results_table(results)
+    print_detailed_results(results, verbose_errors=args.verbose_errors)
 
 
 if __name__ == "__main__":

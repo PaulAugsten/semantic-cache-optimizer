@@ -1,11 +1,12 @@
 """
-Length-based adaptive threshold similarity evaluation.
+Score-gap adaptive threshold similarity evaluation.
 
-For short queries (< 5 words): increase threshold to 0.92 due to ambiguity.
-For longer queries (> 10 words): decrease threshold to 0.78 as context is clearer.
+Uses the difference between Top-1 and Top-2 similarity scores:
+- Small gap (uncertainty): Higher threshold (stricter matching).
+- Large gap (confidence): Lower threshold (more lenient matching).
 """
 
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, List
 
 import numpy as np
 from loguru import logger
@@ -15,26 +16,25 @@ from gptcache.embedding import Huggingface
 from gptcache import cache
 from gptcache.manager import CacheBase, VectorBase, get_data_manager
 
-from ..preprocessing import count_words
 from gptcache.processor.pre import get_prompt
 
 
-class LengthBasedSimilarityEvaluation(SimilarityEvaluation):
+class ScoreGapSimilarityEvaluation(SimilarityEvaluation):
     """
-    Length-based adaptive threshold similarity evaluation.
+    Score-gap adaptive threshold similarity evaluation.
 
-    Adjusts the effective similarity score based on query length.
+    Adjusts similarity based on the gap between top-1 and top-2 scores.
     Contains the embedding model internally using gptcache Huggingface.
 
     Example:
         .. code-block:: python
 
-            from src.similarity_evaluators import LengthBasedSimilarityEvaluation
+            from src.similarity_evaluators import ScoreGapSimilarityEvaluation
 
-            evaluation = LengthBasedSimilarityEvaluation(config)
+            evaluation = ScoreGapSimilarityEvaluation(config)
             score = evaluation.evaluation(
-                {"question": "What is AI?"},
-                {"question": "What is artificial intelligence?"}
+                {"question": "What is Python?"},
+                {"question": "Explain Python programming"}
             )
     """
 
@@ -45,7 +45,7 @@ class LengthBasedSimilarityEvaluation(SimilarityEvaluation):
         device: str = None,
     ):
         """
-        Initialize with length-based config and embedding model.
+        Initialize with score-gap config and embedding model.
 
         Args:
             config: Configuration with threshold settings.
@@ -63,56 +63,35 @@ class LengthBasedSimilarityEvaluation(SimilarityEvaluation):
         self.model_name = model_name
         self.device = device_name
 
-        # Length-based threshold config
-        length_config = config.get("adaptive_thresholds", {}).get("length_based", {})
-        self.short_query_words = length_config.get("short_query_words", 5)
-        self.long_query_words = length_config.get("long_query_words", 10)
-        self.short_threshold = length_config.get("short_threshold", 0.92)
-        self.medium_threshold = length_config.get("medium_threshold", 0.80)
-        self.long_threshold = length_config.get("long_threshold", 0.78)
+        # Score-gap threshold config
+        gap_config = config.get("adaptive_thresholds", {}).get("score_gap", {})
+        self.small_gap_threshold = gap_config.get("small_gap_threshold", 0.92)
+        self.large_gap_threshold = gap_config.get("large_gap_threshold", 0.78)
+        self.gap_cutoff = gap_config.get("gap_cutoff", 0.1)
 
-        # Base threshold for normalization
         self.base_threshold = config.get("cache", {}).get("similarity_threshold", 0.80)
 
         # Logging state
         self.last_computed_threshold = None
         self.last_similarity = None
-        self.last_query_length = None
+        self.last_top_k_similarities: List[float] = []
+        self.last_score_gap = None
 
-        logger.info(f"LengthBasedSimilarityEvaluation initialized: model={model_name}")
+        # Store recent similarities for gap calculation
+        self._recent_similarities: List[float] = []
 
-    def _compute_adaptive_threshold(self, query: str) -> float:
-        """
-        Compute adaptive threshold based on query length.
-
-        Args:
-            query: The query text.
-
-        Returns:
-            Computed adaptive threshold.
-        """
-        word_count = count_words(query)
-        self.last_query_length = word_count
-
-        if word_count < self.short_query_words:
-            threshold = self.short_threshold
-        elif word_count > self.long_query_words:
-            threshold = self.long_threshold
-        else:
-            threshold = self.medium_threshold
-
-        self.last_computed_threshold = threshold
-        return threshold
+        logger.info(f"ScoreGapSimilarityEvaluation initialized: model={model_name}")
 
     def evaluation(
-        self, src_dict: Dict[str, Any], cache_dict: Dict[str, Any], **_
+        self, src_dict: Dict[str, Any], cache_dict: Dict[str, Any], **kwargs
     ) -> float:
         """
-        Evaluate similarity with length-based adjustment.
+        Evaluate similarity with score-gap adjustment.
 
         Args:
             src_dict: Dictionary with 'question' key for source query.
             cache_dict: Dictionary with 'question' key for cached query.
+            **kwargs: May contain 'top_k_similarities' for gap calc.
 
         Returns:
             Adjusted similarity score.
@@ -124,7 +103,6 @@ class LengthBasedSimilarityEvaluation(SimilarityEvaluation):
             # Exact match check
             if src_question.lower() == cache_question.lower():
                 self.last_similarity = 1.0
-                self.last_computed_threshold = self.base_threshold
                 return 1.0
 
             # Compute embeddings using Huggingface to_embeddings
@@ -139,15 +117,42 @@ class LengthBasedSimilarityEvaluation(SimilarityEvaluation):
             raw_similarity = float(np.dot(src_norm, cache_norm))
             self.last_similarity = raw_similarity
 
-            # Compute adaptive threshold based on source query length
-            adaptive_threshold = self._compute_adaptive_threshold(src_question)
+            # Get top-k similarities from kwargs or use recent history
+            top_k_sims = kwargs.get("top_k_similarities", [])
+            if not top_k_sims:
+                # Use recent similarities
+                self._recent_similarities.append(raw_similarity)
+                if len(self._recent_similarities) > 5:
+                    self._recent_similarities = self._recent_similarities[-5:]
+                top_k_sims = self._recent_similarities
+
+            self.last_top_k_similarities = sorted(top_k_sims, reverse=True)
+
+            # Compute score gap between top-1 and top-2
+            if len(self.last_top_k_similarities) >= 2:
+                score_gap = (
+                    self.last_top_k_similarities[0] - self.last_top_k_similarities[1]
+                )
+            else:
+                # Only one result - assume high confidence
+                score_gap = self.gap_cutoff * 2
+
+            self.last_score_gap = float(score_gap)
+
+            # Compute adaptive threshold based on gap
+            if score_gap < self.gap_cutoff:
+                adaptive_threshold = self.small_gap_threshold
+            else:
+                adaptive_threshold = self.large_gap_threshold
+
+            self.last_computed_threshold = adaptive_threshold
 
             # Scale similarity to achieve adaptive threshold effect
             threshold_ratio = self.base_threshold / adaptive_threshold
             adjusted_similarity = raw_similarity * threshold_ratio
 
             logger.debug(
-                f"Length-based: words={self.last_query_length}, "
+                f"Score-gap: gap={score_gap:.4f}, "
                 f"threshold={adaptive_threshold:.2f}, "
                 f"raw_sim={raw_similarity:.4f}, "
                 f"adj_sim={adjusted_similarity:.4f}"
@@ -166,9 +171,10 @@ class LengthBasedSimilarityEvaluation(SimilarityEvaluation):
     def get_threshold_info(self) -> Dict[str, Any]:
         """Return last computed threshold info for logging."""
         return {
-            "query_length": self.last_query_length,
+            "score_gap": self.last_score_gap,
             "computed_threshold": self.last_computed_threshold,
             "raw_similarity": self.last_similarity,
+            "top_k_similarities": self.last_top_k_similarities,
         }
 
     @property
@@ -177,9 +183,9 @@ class LengthBasedSimilarityEvaluation(SimilarityEvaluation):
         return self.model.dimension
 
 
-class LengthBasedCache:
+class ScoreGapCache:
     """
-    Cache implementation with length-based adaptive threshold.
+    Cache implementation with score-gap adaptive threshold.
     """
 
     def __init__(self, config: Dict[str, Any]):
@@ -194,13 +200,14 @@ class LengthBasedCache:
         self.cache_initialized = False
 
     def initialize(self) -> None:
-        """Initialize the cache with length-based evaluation."""
+        """Initialize the cache with score-gap evaluation."""
         # Create evaluator with embedded model
-        self.evaluator = LengthBasedSimilarityEvaluation(self.config)
+        self.evaluator = ScoreGapSimilarityEvaluation(self.config)
 
         embedding_dim = self.evaluator.embedding_dimension
         cache_config = self.config.get("cache", {})
         backend = cache_config.get("backend", "faiss")
+        top_k = max(cache_config.get("top_k", 5), 2)
 
         # Create data manager
         cache_base = CacheBase("sqlite")
@@ -209,7 +216,7 @@ class LengthBasedCache:
             vector_base = VectorBase(
                 "faiss",
                 dimension=embedding_dim,
-                top_k=cache_config.get("top_k", 5),
+                top_k=top_k,
             )
         else:
             vector_base = VectorBase("sqlite", dimension=embedding_dim)
@@ -225,8 +232,8 @@ class LengthBasedCache:
         )
 
         self.cache_initialized = True
-        logger.info("Length-based adaptive cache initialized")
+        logger.info("Score-gap adaptive cache initialized")
 
-    def get_evaluator(self) -> LengthBasedSimilarityEvaluation:
+    def get_evaluator(self) -> ScoreGapSimilarityEvaluation:
         """Return the similarity evaluator."""
         return self.evaluator

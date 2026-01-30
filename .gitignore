@@ -64,6 +64,12 @@ profile_default/
 .cache
 cache_data/
 *.index
+gptcache.log
+
+# Example outputs
+examples/*.db
+examples/*.sqlite3
+examples/cache_data/
 
 # Notebook, secrets and env
 .env
@@ -101,6 +107,6 @@ docs/_build/
 
 # Project-specific outputs (do not commit generated results)
 results/
-/results/
+evaluation/results/
 
 # End of file

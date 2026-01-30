@@ -1,12 +1,12 @@
 """
-Density-based adaptive threshold similarity evaluation.
+Length-based adaptive threshold similarity evaluation.
 
-Uses the average similarity of top-k neighbors:
-- High average (dense cluster): increase threshold to be stricter.
-- Low average (sparse): decrease threshold to be more lenient.
+Adapts threshold based on query length:
+- Short queries (< 5 words): Higher threshold (0.92) due to ambiguity.
+- Longer queries (> 10 words): Lower threshold (0.78) as context is clearer.
 """
 
-from typing import Any, Dict, Tuple, List
+from typing import Any, Dict, Tuple
 
 import numpy as np
 from loguru import logger
@@ -16,25 +16,26 @@ from gptcache.embedding import Huggingface
 from gptcache import cache
 from gptcache.manager import CacheBase, VectorBase, get_data_manager
 
+from ..preprocessing import count_words
 from gptcache.processor.pre import get_prompt
 
 
-class DensityBasedSimilarityEvaluation(SimilarityEvaluation):
+class LengthBasedSimilarityEvaluation(SimilarityEvaluation):
     """
-    Density-based adaptive threshold similarity evaluation.
+    Length-based adaptive threshold similarity evaluation.
 
-    Adjusts similarity based on the density of nearby cached items.
+    Adjusts the effective similarity score based on query length.
     Contains the embedding model internally using gptcache Huggingface.
 
     Example:
         .. code-block:: python
 
-            from src.similarity_evaluators import DensityBasedSimilarityEvaluation
+            from src.similarity_evaluators import LengthBasedSimilarityEvaluation
 
-            evaluation = DensityBasedSimilarityEvaluation(config)
+            evaluation = LengthBasedSimilarityEvaluation(config)
             score = evaluation.evaluation(
-                {"question": "What is machine learning?"},
-                {"question": "Explain ML"}
+                {"question": "What is AI?"},
+                {"question": "What is artificial intelligence?"}
             )
     """
 
@@ -45,7 +46,7 @@ class DensityBasedSimilarityEvaluation(SimilarityEvaluation):
         device: str = None,
     ):
         """
-        Initialize with density-based config and embedding model.
+        Initialize with length-based config and embedding model.
 
         Args:
             config: Configuration with threshold settings.
@@ -63,36 +64,56 @@ class DensityBasedSimilarityEvaluation(SimilarityEvaluation):
         self.model_name = model_name
         self.device = device_name
 
-        # Density-based threshold config
-        density_config = config.get("adaptive_thresholds", {}).get("density_based", {})
-        self.top_k = density_config.get("top_k", 5)
-        self.high_density_threshold = density_config.get("high_density_threshold", 0.90)
-        self.low_density_threshold = density_config.get("low_density_threshold", 0.80)
-        self.density_cutoff = density_config.get("density_cutoff", 0.75)
+        # Length-based threshold config
+        length_config = config.get("adaptive_thresholds", {}).get("length_based", {})
+        self.short_query_words = length_config.get("short_query_words", 5)
+        self.long_query_words = length_config.get("long_query_words", 10)
+        self.short_threshold = length_config.get("short_threshold", 0.92)
+        self.medium_threshold = length_config.get("medium_threshold", 0.80)
+        self.long_threshold = length_config.get("long_threshold", 0.78)
 
+        # Base threshold for normalization
         self.base_threshold = config.get("cache", {}).get("similarity_threshold", 0.80)
 
         # Logging state
         self.last_computed_threshold = None
         self.last_similarity = None
-        self.last_top_k_similarities: List[float] = []
-        self.last_average_density = None
+        self.last_query_length = None
 
-        # Store recent similarities for density calculation
-        self._recent_similarities: List[float] = []
+        logger.info(f"LengthBasedSimilarityEvaluation initialized: model={model_name}")
 
-        logger.info(f"DensityBasedSimilarityEvaluation initialized: model={model_name}")
+    def _compute_adaptive_threshold(self, query: str) -> float:
+        """
+        Compute adaptive threshold based on query length.
+
+        Args:
+            query: The query text.
+
+        Returns:
+            Computed adaptive threshold.
+        """
+        word_count = count_words(query)
+        self.last_query_length = word_count
+
+        if word_count < self.short_query_words:
+            threshold = self.short_threshold
+        elif word_count > self.long_query_words:
+            threshold = self.long_threshold
+        else:
+            threshold = self.medium_threshold
+
+        self.last_computed_threshold = threshold
+        return threshold
 
     def evaluation(
-        self, src_dict: Dict[str, Any], cache_dict: Dict[str, Any], **kwargs
+        self, src_dict: Dict[str, Any], cache_dict: Dict[str, Any], **_
     ) -> float:
         """
-        Evaluate similarity with density-based adjustment.
+        Evaluate similarity with length-based adjustment.
 
         Args:
             src_dict: Dictionary with 'question' key for source query.
             cache_dict: Dictionary with 'question' key for cached query.
-            **kwargs: May contain 'top_k_similarities' for density calc.
 
         Returns:
             Adjusted similarity score.
@@ -104,6 +125,7 @@ class DensityBasedSimilarityEvaluation(SimilarityEvaluation):
             # Exact match check
             if src_question.lower() == cache_question.lower():
                 self.last_similarity = 1.0
+                self.last_computed_threshold = self.base_threshold
                 return 1.0
 
             # Compute embeddings using Huggingface to_embeddings
@@ -118,35 +140,15 @@ class DensityBasedSimilarityEvaluation(SimilarityEvaluation):
             raw_similarity = float(np.dot(src_norm, cache_norm))
             self.last_similarity = raw_similarity
 
-            # Get top-k similarities from kwargs or use recent history
-            top_k_sims = kwargs.get("top_k_similarities", [])
-            if not top_k_sims:
-                # Use recent similarities as proxy for density
-                self._recent_similarities.append(raw_similarity)
-                if len(self._recent_similarities) > self.top_k:
-                    self._recent_similarities = self._recent_similarities[-self.top_k :]
-                top_k_sims = self._recent_similarities
-
-            self.last_top_k_similarities = list(top_k_sims)
-
-            # Compute average density
-            avg_density = np.mean(top_k_sims) if top_k_sims else raw_similarity
-            self.last_average_density = float(avg_density)
-
-            # Compute adaptive threshold based on density
-            if avg_density > self.density_cutoff:
-                adaptive_threshold = self.high_density_threshold
-            else:
-                adaptive_threshold = self.low_density_threshold
-
-            self.last_computed_threshold = adaptive_threshold
+            # Compute adaptive threshold based on source query length
+            adaptive_threshold = self._compute_adaptive_threshold(src_question)
 
             # Scale similarity to achieve adaptive threshold effect
             threshold_ratio = self.base_threshold / adaptive_threshold
             adjusted_similarity = raw_similarity * threshold_ratio
 
             logger.debug(
-                f"Density-based: avg_density={avg_density:.4f}, "
+                f"Length-based: words={self.last_query_length}, "
                 f"threshold={adaptive_threshold:.2f}, "
                 f"raw_sim={raw_similarity:.4f}, "
                 f"adj_sim={adjusted_similarity:.4f}"
@@ -165,10 +167,9 @@ class DensityBasedSimilarityEvaluation(SimilarityEvaluation):
     def get_threshold_info(self) -> Dict[str, Any]:
         """Return last computed threshold info for logging."""
         return {
-            "average_density": self.last_average_density,
+            "query_length": self.last_query_length,
             "computed_threshold": self.last_computed_threshold,
             "raw_similarity": self.last_similarity,
-            "top_k_similarities": self.last_top_k_similarities,
         }
 
     @property
@@ -177,9 +178,9 @@ class DensityBasedSimilarityEvaluation(SimilarityEvaluation):
         return self.model.dimension
 
 
-class DensityBasedCache:
+class LengthBasedCache:
     """
-    Cache implementation with density-based adaptive threshold.
+    Cache implementation with length-based adaptive threshold.
     """
 
     def __init__(self, config: Dict[str, Any]):
@@ -194,14 +195,13 @@ class DensityBasedCache:
         self.cache_initialized = False
 
     def initialize(self) -> None:
-        """Initialize the cache with density-based evaluation."""
+        """Initialize the cache with length-based evaluation."""
         # Create evaluator with embedded model
-        self.evaluator = DensityBasedSimilarityEvaluation(self.config)
+        self.evaluator = LengthBasedSimilarityEvaluation(self.config)
 
         embedding_dim = self.evaluator.embedding_dimension
         cache_config = self.config.get("cache", {})
         backend = cache_config.get("backend", "faiss")
-        top_k = cache_config.get("top_k", 5)
 
         # Create data manager
         cache_base = CacheBase("sqlite")
@@ -210,7 +210,7 @@ class DensityBasedCache:
             vector_base = VectorBase(
                 "faiss",
                 dimension=embedding_dim,
-                top_k=top_k,
+                top_k=cache_config.get("top_k", 5),
             )
         else:
             vector_base = VectorBase("sqlite", dimension=embedding_dim)
@@ -226,8 +226,8 @@ class DensityBasedCache:
         )
 
         self.cache_initialized = True
-        logger.info("Density-based adaptive cache initialized")
+        logger.info("Length-based adaptive cache initialized")
 
-    def get_evaluator(self) -> DensityBasedSimilarityEvaluation:
+    def get_evaluator(self) -> LengthBasedSimilarityEvaluation:
         """Return the similarity evaluator."""
         return self.evaluator

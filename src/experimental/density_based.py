@@ -1,9 +1,9 @@
 """
-Score-gap adaptive threshold similarity evaluation.
+Density-based adaptive threshold similarity evaluation.
 
-Uses the difference between Top-1 and Top-2 similarity scores:
-- Small gap (uncertainty): increase threshold to be stricter.
-- Large gap (confidence): decrease threshold to be more lenient.
+Uses the average similarity of top-k neighbors:
+- High average (dense cluster): Higher threshold (stricter matching).
+- Low average (sparse): Lower threshold (more lenient matching).
 """
 
 from typing import Any, Dict, Tuple, List
@@ -19,22 +19,22 @@ from gptcache.manager import CacheBase, VectorBase, get_data_manager
 from gptcache.processor.pre import get_prompt
 
 
-class ScoreGapSimilarityEvaluation(SimilarityEvaluation):
+class DensityBasedSimilarityEvaluation(SimilarityEvaluation):
     """
-    Score-gap adaptive threshold similarity evaluation.
+    Density-based adaptive threshold similarity evaluation.
 
-    Adjusts similarity based on the gap between top-1 and top-2 scores.
+    Adjusts similarity based on the density of nearby cached items.
     Contains the embedding model internally using gptcache Huggingface.
 
     Example:
         .. code-block:: python
 
-            from src.similarity_evaluators import ScoreGapSimilarityEvaluation
+            from src.similarity_evaluators import DensityBasedSimilarityEvaluation
 
-            evaluation = ScoreGapSimilarityEvaluation(config)
+            evaluation = DensityBasedSimilarityEvaluation(config)
             score = evaluation.evaluation(
-                {"question": "What is Python?"},
-                {"question": "Explain Python programming"}
+                {"question": "What is machine learning?"},
+                {"question": "Explain ML"}
             )
     """
 
@@ -45,7 +45,7 @@ class ScoreGapSimilarityEvaluation(SimilarityEvaluation):
         device: str = None,
     ):
         """
-        Initialize with score-gap config and embedding model.
+        Initialize with density-based config and embedding model.
 
         Args:
             config: Configuration with threshold settings.
@@ -63,11 +63,12 @@ class ScoreGapSimilarityEvaluation(SimilarityEvaluation):
         self.model_name = model_name
         self.device = device_name
 
-        # Score-gap threshold config
-        gap_config = config.get("adaptive_thresholds", {}).get("score_gap", {})
-        self.small_gap_threshold = gap_config.get("small_gap_threshold", 0.92)
-        self.large_gap_threshold = gap_config.get("large_gap_threshold", 0.78)
-        self.gap_cutoff = gap_config.get("gap_cutoff", 0.1)
+        # Density-based threshold config
+        density_config = config.get("adaptive_thresholds", {}).get("density_based", {})
+        self.top_k = density_config.get("top_k", 5)
+        self.high_density_threshold = density_config.get("high_density_threshold", 0.90)
+        self.low_density_threshold = density_config.get("low_density_threshold", 0.80)
+        self.density_cutoff = density_config.get("density_cutoff", 0.75)
 
         self.base_threshold = config.get("cache", {}).get("similarity_threshold", 0.80)
 
@@ -75,23 +76,23 @@ class ScoreGapSimilarityEvaluation(SimilarityEvaluation):
         self.last_computed_threshold = None
         self.last_similarity = None
         self.last_top_k_similarities: List[float] = []
-        self.last_score_gap = None
+        self.last_average_density = None
 
-        # Store recent similarities for gap calculation
+        # Store recent similarities for density calculation
         self._recent_similarities: List[float] = []
 
-        logger.info(f"ScoreGapSimilarityEvaluation initialized: model={model_name}")
+        logger.info(f"DensityBasedSimilarityEvaluation initialized: model={model_name}")
 
     def evaluation(
         self, src_dict: Dict[str, Any], cache_dict: Dict[str, Any], **kwargs
     ) -> float:
         """
-        Evaluate similarity with score-gap adjustment.
+        Evaluate similarity with density-based adjustment.
 
         Args:
             src_dict: Dictionary with 'question' key for source query.
             cache_dict: Dictionary with 'question' key for cached query.
-            **kwargs: May contain 'top_k_similarities' for gap calc.
+            **kwargs: May contain 'top_k_similarities' for density calc.
 
         Returns:
             Adjusted similarity score.
@@ -120,30 +121,23 @@ class ScoreGapSimilarityEvaluation(SimilarityEvaluation):
             # Get top-k similarities from kwargs or use recent history
             top_k_sims = kwargs.get("top_k_similarities", [])
             if not top_k_sims:
-                # Use recent similarities
+                # Use recent similarities as proxy for density
                 self._recent_similarities.append(raw_similarity)
-                if len(self._recent_similarities) > 5:
-                    self._recent_similarities = self._recent_similarities[-5:]
+                if len(self._recent_similarities) > self.top_k:
+                    self._recent_similarities = self._recent_similarities[-self.top_k :]
                 top_k_sims = self._recent_similarities
 
-            self.last_top_k_similarities = sorted(top_k_sims, reverse=True)
+            self.last_top_k_similarities = list(top_k_sims)
 
-            # Compute score gap between top-1 and top-2
-            if len(self.last_top_k_similarities) >= 2:
-                score_gap = (
-                    self.last_top_k_similarities[0] - self.last_top_k_similarities[1]
-                )
+            # Compute average density
+            avg_density = np.mean(top_k_sims) if top_k_sims else raw_similarity
+            self.last_average_density = float(avg_density)
+
+            # Compute adaptive threshold based on density
+            if avg_density > self.density_cutoff:
+                adaptive_threshold = self.high_density_threshold
             else:
-                # Only one result - assume high confidence
-                score_gap = self.gap_cutoff * 2
-
-            self.last_score_gap = float(score_gap)
-
-            # Compute adaptive threshold based on gap
-            if score_gap < self.gap_cutoff:
-                adaptive_threshold = self.small_gap_threshold
-            else:
-                adaptive_threshold = self.large_gap_threshold
+                adaptive_threshold = self.low_density_threshold
 
             self.last_computed_threshold = adaptive_threshold
 
@@ -152,7 +146,7 @@ class ScoreGapSimilarityEvaluation(SimilarityEvaluation):
             adjusted_similarity = raw_similarity * threshold_ratio
 
             logger.debug(
-                f"Score-gap: gap={score_gap:.4f}, "
+                f"Density-based: avg_density={avg_density:.4f}, "
                 f"threshold={adaptive_threshold:.2f}, "
                 f"raw_sim={raw_similarity:.4f}, "
                 f"adj_sim={adjusted_similarity:.4f}"
@@ -171,7 +165,7 @@ class ScoreGapSimilarityEvaluation(SimilarityEvaluation):
     def get_threshold_info(self) -> Dict[str, Any]:
         """Return last computed threshold info for logging."""
         return {
-            "score_gap": self.last_score_gap,
+            "average_density": self.last_average_density,
             "computed_threshold": self.last_computed_threshold,
             "raw_similarity": self.last_similarity,
             "top_k_similarities": self.last_top_k_similarities,
@@ -183,9 +177,9 @@ class ScoreGapSimilarityEvaluation(SimilarityEvaluation):
         return self.model.dimension
 
 
-class ScoreGapCache:
+class DensityBasedCache:
     """
-    Cache implementation with score-gap adaptive threshold.
+    Cache implementation with density-based adaptive threshold.
     """
 
     def __init__(self, config: Dict[str, Any]):
@@ -200,14 +194,14 @@ class ScoreGapCache:
         self.cache_initialized = False
 
     def initialize(self) -> None:
-        """Initialize the cache with score-gap evaluation."""
+        """Initialize the cache with density-based evaluation."""
         # Create evaluator with embedded model
-        self.evaluator = ScoreGapSimilarityEvaluation(self.config)
+        self.evaluator = DensityBasedSimilarityEvaluation(self.config)
 
         embedding_dim = self.evaluator.embedding_dimension
         cache_config = self.config.get("cache", {})
         backend = cache_config.get("backend", "faiss")
-        top_k = max(cache_config.get("top_k", 5), 2)
+        top_k = cache_config.get("top_k", 5)
 
         # Create data manager
         cache_base = CacheBase("sqlite")
@@ -232,8 +226,8 @@ class ScoreGapCache:
         )
 
         self.cache_initialized = True
-        logger.info("Score-gap adaptive cache initialized")
+        logger.info("Density-based adaptive cache initialized")
 
-    def get_evaluator(self) -> ScoreGapSimilarityEvaluation:
+    def get_evaluator(self) -> DensityBasedSimilarityEvaluation:
         """Return the similarity evaluator."""
         return self.evaluator
